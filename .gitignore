@@ -23,3 +23,6 @@ logs/
 # 機密
 .env
 .env.*
+
+# Claude 的工作樹
+.claude/

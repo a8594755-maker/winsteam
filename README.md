@@ -4,7 +4,7 @@
 
 一個指令裝好 Rosetta 2、Sikarugir（Wine wrapper）、Wine 引擎和 Windows 版 Steam，再用內建的遊戲設定檔切換圖形後端與同步設定。免費，不需要 CrossOver 授權。
 
-> **狀態：v0.1.0，早期版本。** 指令流程已用乾跑和模擬 wrapper 測過；`setup` 的完整安裝流程還沒有在實機上從頭跑到尾。底層的安裝步驟來自一份在 M2 MacBook Air（macOS 26）上實測成功的指南。
+> **狀態：v0.1.0，早期版本。** `setup` 已在 M2 MacBook Air（16 GB、macOS 27.0.1）上實機跑通：Rosetta 2、引擎與範本下載、wrapper 組裝、Windows 環境、Steam 靜默安裝都成功，Steam 用戶端可以啟動並開始自我更新。登入後的使用與遊戲實際執行尚未驗證。
 
 ## 需求
 
@@ -32,11 +32,12 @@ winsteam doctor
 winsteam setup
 ```
 
-`setup` 過程中有三個地方需要你自己動手：
+`setup` 會自動下載、組裝、安裝 Steam 並把它打開。只有兩個地方需要你自己動手：
 
-1. **Rosetta 2**：閱讀並同意 Apple 的授權條款。
-2. **Steam 安裝精靈**：路徑保持預設，最後一頁取消勾選「Run Steam」。
-3. **登入 Steam**：在視窗裡輸入你自己的帳號密碼。
+1. **Rosetta 2**（只有還沒裝過的 Mac）：閱讀並同意 Apple 的授權條款。
+2. **登入 Steam**：在跳出的 Steam 視窗輸入你自己的帳號密碼。
+
+全程不需要打開 Sikarugir 自己的設定視窗。
 
 ## 使用
 

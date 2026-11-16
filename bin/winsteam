@@ -261,6 +261,33 @@ cmd_doctor() {
 }
 
 # ── 指令：setup ──────────────────────────────────────────────────────────
+# Steam 的安裝檔是 NSIS，/S 會靜默裝到預設路徑，而且不會在結束時自動啟動 Steam。
+# 透過 wrapper 平常啟動程式的同一條路（Info.plist 的目標程式 + 參數）執行，
+# 這樣 Wine 的環境變數才會和之後跑 Steam 時一致，使用者也不會看到任何視窗。
+install_steam_silent() { # install_steam_silent <SteamSetup.exe 的路徑>
+  local setup="$1" staged="$WRAPPER/Contents/drive_c/SteamSetup.exe" opener i=0
+  info "自動安裝 Steam（不需要任何操作，通常一分鐘內完成）…"
+  if [ "$DRY_RUN" = 1 ]; then
+    info "  [dry-run] 在 wrapper 內以 /S 靜默模式執行 SteamSetup.exe"
+    return 0
+  fi
+  cp "$setup" "$staged"
+  plist_set_str "Program Name and Path" "/SteamSetup.exe"
+  plist_set_str "Program Flags" "/S"
+  plist_set_int "Skip Gecko" 1
+  plist_set_int "Skip Mono" 1
+  open -W "$WRAPPER" >/dev/null 2>&1 &
+  opener=$!
+  # 最多等 3 分鐘讓 Steam.exe 出現，再等最多 2 分鐘讓 wrapper 自己收尾。
+  while [ ! -f "$STEAM_EXE" ] && [ "$i" -lt 36 ]; do sleep 5; i=$((i + 1)); done
+  i=0
+  while kill -0 "$opener" 2>/dev/null && [ "$i" -lt 24 ]; do sleep 5; i=$((i + 1)); done
+  if kill -0 "$opener" 2>/dev/null; then wineserver_kill; fi
+  rm -f "$staged"
+  plist_set_str "Program Flags" ""
+  plist_set_str "Program Name and Path" "/nothing.exe"
+}
+
 cmd_setup() {
   local engine_tar="$CACHE/Engines/${ENGINE}.tar.xz"
   local template_tar="$CACHE/Template/${TEMPLATE}.tar.xz"
@@ -337,15 +364,18 @@ cmd_setup() {
     ok "已安裝"
   else
     download "$STEAM_SETUP_URL" "$steam_setup"
-    info ""
-    info "${C_B}接下來會跳出 Steam 的安裝精靈，這一步要你自己點：${C_0}"
-    info "  1. 安裝路徑保持預設（C:\\Program Files (x86)\\Steam）"
-    info "  2. 最後一頁${C_B}取消勾選${C_0}「Run Steam」再按 Finish"
-    pause "準備好後按 Enter 開始… "
-    run "$LAUNCH" WSS-installer "$steam_setup"
+    install_steam_silent "$steam_setup"
     if [ "$DRY_RUN" != 1 ]; then
-      [ -f "$STEAM_EXE" ] || pause "安裝精靈跑完後按 Enter 繼續… "
-      [ -f "$STEAM_EXE" ] || die "找不到 Steam.exe。請確認安裝路徑是預設值，然後重跑 winsteam setup。"
+      if [ ! -f "$STEAM_EXE" ]; then
+        # 靜默安裝失敗時的退路：跳出安裝精靈讓使用者自己點。
+        warn "自動安裝沒有成功，改用 Steam 的安裝精靈。"
+        info "  1. 安裝路徑保持預設（C:\\Program Files (x86)\\Steam）"
+        info "  2. 最後一頁${C_B}取消勾選${C_0}「Run Steam」再按 Finish"
+        pause "準備好後按 Enter 開始… "
+        "$LAUNCH" WSS-installer "$steam_setup"
+        [ -f "$STEAM_EXE" ] || pause "安裝精靈跑完後按 Enter 繼續… "
+        [ -f "$STEAM_EXE" ] || die "找不到 Steam.exe。請確認安裝路徑是預設值，然後重跑 winsteam setup。"
+      fi
       ok "Steam 安裝完成"
     fi
   fi
@@ -361,12 +391,17 @@ cmd_setup() {
   info ""
   ok "${C_B}安裝完成${C_0}"
   info ""
-  info "下一步："
-  info "  1. 執行 ${C_B}winsteam run${C_0}，在視窗裡登入你自己的 Steam 帳號"
+  info "接下來只剩兩件事："
+  info "  1. 在跳出的 Steam 視窗登入你自己的帳號"
   info "     （第一次啟動會下載更新，視窗看起來像當掉是正常的，等幾分鐘）"
-  info "  2. 在 Steam 的 設定 → 介面 關掉「在網頁檢視中啟用 GPU 加速算繪」"
-  info "  3. 在 Steam 裡安裝遊戲，之後用 ${C_B}winsteam play <遊戲>${C_0} 啟動"
+  info "  2. 在 Steam 裡安裝遊戲，之後用 ${C_B}winsteam play <遊戲>${C_0} 啟動"
   info "     可用的遊戲設定檔：winsteam games"
+  info ""
+  info "建議：在 Steam 的 設定 → 介面 關掉「在網頁檢視中啟用 GPU 加速算繪」，比較不會當掉。"
+  if [ "$DRY_RUN" != 1 ]; then
+    info ""
+    cmd_run
+  fi
 }
 
 # ── 指令：run / play ─────────────────────────────────────────────────────
