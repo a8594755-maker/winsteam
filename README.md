@@ -1,65 +1,127 @@
-# mac-steam-windows-games
+# winsteam
 
-在 Apple Silicon MacBook 上，用轉譯層跑 Windows 版 Steam 與 Windows 專屬遊戲的設定專案。
+在 Apple Silicon 的 Mac 上跑 **Windows 版 Steam** 和 Windows 專屬遊戲的命令列工具。
 
-目標遊戲：
+一個指令裝好 Rosetta 2、Sikarugir（Wine wrapper）、Wine 引擎和 Windows 版 Steam，再用內建的遊戲設定檔切換圖形後端與同步設定。免費，不需要 CrossOver 授權。
 
-| 遊戲 | Steam App ID | 狀態 |
-|---|---|---|
-| R.E.P.O. | 3241660 | 尚未安裝 |
-| MIMESIS | 2827200 | 尚未安裝 |
+> **狀態：v0.1.0，早期版本。** 指令流程已用乾跑和模擬 wrapper 測過；`setup` 的完整安裝流程還沒有在實機上從頭跑到尾。底層的安裝步驟來自一份在 M2 MacBook Air（macOS 26）上實測成功的指南。
 
-## 這台機器（2026-11-15 檢查）
+## 需求
 
-- MacBook Air M2（Mac14,2），8 核心（4P + 4E），無風扇
-- 16 GB 記憶體，內建螢幕 2560 × 1664
-- macOS 27.0.1，Metal 4
-- 可用磁碟空間約 50 GB（已用 89%）
-- Rosetta 2：**未安裝**（目前所有轉譯方案都需要）
-- 已安裝：macOS 版 Steam（沒有遊戲）、Sikarugir Creator 1.0.1（沒有引擎、沒有 wrapper）、Homebrew
+- Apple Silicon 的 Mac（M1 以後）
+- macOS 14 到 27（macOS 28 起 Apple 不再提供一般用途的 Rosetta 2，這個做法會失效）
+- [Homebrew](https://brew.sh)
+- 至少 12 GB 可用空間
+- **遊戲要已經在你自己的 Steam 帳號裡**
 
-## 可行性評估
+## 安裝
 
-### R.E.P.O.：可行性高
+```bash
+curl -fsSL https://raw.githubusercontent.com/a8594755-maker/winsteam/main/install.sh | bash
+```
 
-- CodeWeavers 相容性資料庫評為「Runs Great」（CrossOver 26.2.0、macOS 26）。
-- ProtonDB 為 Platinum（392 份回報），代表在 Wine 系轉譯下沒有反作弊阻擋。
-- 官方最低需求 GTX 970、建議 GTX 1070，容量 1 GB。
-- 已知問題：在 CrossOver 下主選單的「Join Game」按鈕有時沒反應。
+安裝腳本只會把 winsteam 放到 `~/.winsteam` 並在 PATH 上建立連結，不需要 `sudo`。
 
-### MIMESIS：不確定，要實測
+接著：
 
-- ProtonDB 為 Gold、近期趨勢 Platinum（19 份回報），所以 Wine 系轉譯在 Linux 上跑得起來。
-- 但 CodeWeavers 對 Mac 的評級是「Installs, Will Not Run」（只有一筆測試，版本是較舊的 CrossOver 26.0.0）。失敗原因沒查到。
-- 官方最低需求 GTX 1050 Ti、建議 GTX 1660 Super + 16 GB RAM，容量 4 GB，必須有麥克風。
-- 比 R.E.P.O. 吃效能，M2 Air 就算跑得起來也要降解析度與畫質。
+```bash
+winsteam doctor
+```
 
-## 方案比較
+```bash
+winsteam setup
+```
 
-| 方案 | 費用 | 優點 | 缺點 |
+`setup` 過程中有三個地方需要你自己動手：
+
+1. **Rosetta 2**：閱讀並同意 Apple 的授權條款。
+2. **Steam 安裝精靈**：路徑保持預設，最後一頁取消勾選「Run Steam」。
+3. **登入 Steam**：在視窗裡輸入你自己的帳號密碼。
+
+## 使用
+
+| 指令 | 作用 |
+|---|---|
+| `winsteam doctor` | 檢查這台 Mac 是否符合條件、目前裝到哪一步 |
+| `winsteam setup` | 一次裝好所有東西；可以重複執行，做過的步驟會略過 |
+| `winsteam run` | 啟動 Windows 版 Steam |
+| `winsteam games` | 列出內建的遊戲設定檔 |
+| `winsteam play repo` | 套用該遊戲的設定並啟動 |
+| `winsteam play repo --backend d3dmetal` | 這次改用指定的圖形後端 |
+| `winsteam backend dxmt` | 切換整個 wrapper 的圖形後端 |
+| `winsteam hud on` | 顯示 Metal 效能 HUD（FPS、畫格時間） |
+| `winsteam status` | 顯示目前的設定 |
+| `winsteam logs` | 顯示 Steam 記錄檔 |
+| `winsteam kill` | 強制結束卡住的 Wine 程序 |
+| `winsteam uninstall` | 刪除 wrapper，包含裡面的 Steam 和遊戲 |
+
+任何指令前面加 `--dry-run` 都只會印出要做的事，不會真的執行。
+
+## 支援的遊戲
+
+| 指令名稱 | 遊戲 | 預設後端 | 狀況 |
 |---|---|---|---|
-| Sikarugir + D3DMetal / DXMT | 免費 | Creator 已安裝；有人在同款 M2 Air 16 GB 上測通 Windows Steam | Steam 更新容易弄壞；沒有人負責修；尚無 macOS 27 的實測回報 |
-| CrossOver 26.3 | 付費，14 天試用 | 對 Steam 的支援最穩；內建 D3DMetal 3.0 與 DXMT | 要花錢 |
-| Parallels（Windows on ARM 虛擬機） | 付費 | 相容性走另一條路 | 16 GB 要分給虛擬機，圖形效能較差 |
+| `repo` | R.E.P.O. | DXMT | 預期可玩。CodeWeavers 評「Runs Great」、ProtonDB Platinum |
+| `mimesis` | MIMESIS | D3DMetal | **實驗性。** ProtonDB Gold，但 CodeWeavers 在 Mac 上回報「Installs, Will Not Run」 |
 
-## 效能優化方向
+沒有設定檔的遊戲也能玩：`winsteam run` 開 Steam 後照常安裝、執行即可。使用核心層反作弊的遊戲（例如 Vanguard）無法在任何 Wine 方案下執行。
 
-1. 逐款遊戲比較圖形後端：DXMT（DX10/11）對 D3DMetal（DX11/12）。
-2. 開啟 MSync / ESync。
-3. 關閉 Retina 高解析模式，改以 1440 × 900 左右輸出。
-4. Steam 內關閉「網頁檢視使用 GPU 加速」與遊戲內 Overlay。
-5. 插電遊玩；這台沒有風扇，長時間會降頻，散熱墊有幫助。
-6. 遊戲前關掉其他吃記憶體的程式（16 GB 是 CPU 與 GPU 共用）。
+### 新增遊戲
 
-## 注意事項
+在 `profiles/` 放一個 `<名稱>.conf`：
 
-- 兩款遊戲都要先在自己的 Steam 帳號擁有。
-- Rosetta 2 在 macOS 27 仍可完整使用；依 Apple 公布的規劃，macOS 28 起不再支援這種用途，屆時要改用 CrossOver 27（內建 FEX 轉譯）這類不靠 Rosetta 的方案。
+```ini
+NAME="遊戲顯示名稱"
+APPID=1234567
+BACKEND=dxmt
+BACKEND_ALT=d3dmetal
+MSYNC=1
+TIPS="第一條提醒|第二條提醒"
+```
 
-## 參考資料
+`APPID` 是 Steam 商店網址裡的數字。歡迎把測過的設定檔用 PR 送回來。
 
-- [CodeWeavers：R.E.P.O.](https://www.codeweavers.com/compatibility/crossover/repo)
-- [CodeWeavers：MIMESIS](https://www.codeweavers.com/compatibility/crossover/mimesis)
-- [windows-steam-on-apple-silicon（M2 Air 實測指南）](https://github.com/mirpo/windows-steam-on-apple-silicon)
-- [Sikarugir](https://github.com/Sikarugir-App/Sikarugir)
-- [AppleInsider：CrossOver 的 Apple Silicon 原生版測試中](https://appleinsider.com/articles/26/07/31/first-apple-silicon-native-crossover-build-in-testing-as-rosettas-end-nears)
+## 效能調校
+
+- **圖形後端**是影響最大的選項。DirectX 11 的遊戲通常 DXMT 比較快；DirectX 12 只有 D3DMetal 能跑。用 `winsteam hud on` 看 FPS，兩個都試。
+- **解析度**：Wine 預設不使用 Retina 模式，遊戲看到的是較低的邏輯解析度，這對效能有利。在遊戲內選 1440 × 900 或更低。
+- **Steam 設定**：關掉「在網頁檢視中啟用 GPU 加速算繪」和遊戲內嵌介面，這兩個在 Wine 下常當掉。
+- **散熱**：MacBook Air 沒有風扇，插電玩，墊高或用散熱墊。
+- **記憶體**：CPU 和 GPU 共用記憶體，遊戲前關掉瀏覽器等大型程式。
+
+## 疑難排解
+
+| 症狀 | 原因與處理 |
+|---|---|
+| Steam 啟動時 `Unexpected Transport Error (0x3008)` | 引擎不對。確認 `winsteam status` 顯示的是 `sikarugir 10.0` 系列 |
+| 登入成功後立刻顯示 NO CONNECTION | 同一個帳號在 macOS 版 Steam 也登入了。關掉 macOS 版，`winsteam kill` 後再 `winsteam run` |
+| 改了設定沒有反應 | 舊的 Wine 程序還在。`winsteam kill` 後重新啟動 |
+| Steam 的「重新啟動」按鈕讓設定跑掉 | 那個按鈕會繞過 wrapper。改用「離開 Steam」，再 `winsteam run` |
+| 第一次啟動視窗像當掉 | 正在下載用戶端更新，等幾分鐘 |
+
+## 限制與風險
+
+- **沒有人保固。** Steam 更新、遊戲更新、macOS 更新或引擎更新都可能讓它壞掉。需要長期穩定的方案請考慮付費的 [CrossOver](https://www.codeweavers.com/crossover)。
+- **Sikarugir 沒有經過 Apple 公證**（ad-hoc 簽章），Homebrew 安裝時會移除隔離標記。等於你信任的是該專案而不是 Apple。
+- macOS 版 Steam 幫不上忙：Windows 專屬遊戲沒有 macOS 版本可下載，wrapper 裡的 Steam 是獨立的登入和獨立的遊戲下載。
+- 這個工具不處理購買、DRM、反作弊或區域限制。
+
+## 移除
+
+```bash
+winsteam uninstall --all
+```
+
+```bash
+rm -rf ~/.winsteam "$(command -v winsteam)"
+```
+
+Sikarugir Creator 和 Rosetta 2 會留著。要移除 Creator：`brew uninstall --cask sikarugir`。
+
+## 致謝
+
+- [Sikarugir](https://github.com/Sikarugir-App/Sikarugir)，由 Gcenx 維護。
+- 安裝步驟參考 [mirpo/windows-steam-on-apple-silicon](https://github.com/mirpo/windows-steam-on-apple-silicon)（CC0）。
+- 相容性資料來自 [CodeWeavers](https://www.codeweavers.com/compatibility) 與 [ProtonDB](https://www.protondb.com)。
+
+winsteam 與 Valve、Steam、CodeWeavers 或任何遊戲開發商沒有關係。

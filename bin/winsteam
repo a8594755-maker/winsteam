@@ -1,0 +1,588 @@
+#!/bin/bash
+# winsteam — 在 Apple Silicon Mac 上安裝、啟動並調校 Windows 版 Steam
+# 底層使用 Sikarugir（Wine wrapper）與 D3DMetal / DXMT。
+# 相容 macOS 內建的 bash 3.2，不需要額外相依套件。
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# ── 設定（都可以用環境變數覆寫）──────────────────────────────────────────
+WRAPPER="${WINSTEAM_WRAPPER:-$HOME/Applications/Sikarugir/Steam.app}"
+CACHE="${WINSTEAM_CACHE:-$HOME/Library/Application Support/Sikarugir}"
+# 這組引擎 + 範本是在 M2 MacBook Air 上實測能讓 Steam 用戶端啟動的組合。
+# 換成 CrossOver 系引擎（WS12WineCX…）會在 Steam 啟動時出現 0x3008 錯誤。
+ENGINE="${WINSTEAM_ENGINE:-WS12WineSikarugir10.0_6}"
+TEMPLATE="${WINSTEAM_TEMPLATE:-Template-1.0.11}"
+MIN_FREE_GB="${WINSTEAM_MIN_FREE_GB:-12}"
+
+ENGINE_URL="https://github.com/Sikarugir-App/Engines/releases/download/v1.0/${ENGINE}.tar.xz"
+TEMPLATE_URL="https://github.com/Sikarugir-App/Wrapper/releases/download/v1.0/${TEMPLATE}.tar.xz"
+STEAM_SETUP_URL="https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe"
+
+LAUNCH="$WRAPPER/Contents/MacOS/Sikarugir"
+PLIST="$WRAPPER/Contents/Info.plist"
+STEAM_REL="Program Files (x86)/Steam"
+STEAM_EXE="$WRAPPER/Contents/drive_c/$STEAM_REL/Steam.exe"
+
+DRY_RUN=0
+ASSUME_YES=0
+
+# ── 找到自己的安裝位置（會跟著 symlink 走）────────────────────────────────
+resolve_self() {
+  local src="$0" dir
+  while [ -L "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")/.." && pwd
+}
+ROOT="$(resolve_self)"
+PROFILES="${WINSTEAM_PROFILES:-$ROOT/profiles}"
+
+# ── 輸出 ────────────────────────────────────────────────────────────────
+if [ -t 1 ]; then
+  C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'; C_DIM=$'\033[2m'; C_B=$'\033[1m'; C_0=$'\033[0m'
+else
+  C_OK=""; C_WARN=""; C_ERR=""; C_DIM=""; C_B=""; C_0=""
+fi
+ok()   { printf '%s✓%s %s\n' "$C_OK" "$C_0" "$*"; }
+warn() { printf '%s!%s %s\n' "$C_WARN" "$C_0" "$*"; }
+bad()  { printf '%s✗%s %s\n' "$C_ERR" "$C_0" "$*"; }
+info() { printf '%s\n' "$*"; }
+step() { printf '\n%s▸ %s%s\n' "$C_B" "$*" "$C_0"; }
+die()  { bad "$*" >&2; exit 1; }
+
+# 會改動系統的指令都經過 run；--dry-run 時只印出來不執行。
+run() {
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '  %s[dry-run]%s' "$C_DIM" "$C_0"; printf ' %q' "$@"; printf '\n'
+  else
+    "$@"
+  fi
+}
+
+# /dev/tty 可能存在卻無法使用（例如從排程或管線執行），要實際開開看。
+has_tty() { { : < /dev/tty; } 2>/dev/null; }
+
+confirm() {
+  [ "$ASSUME_YES" = 1 ] && return 0
+  [ "$DRY_RUN" = 1 ] && { info "  [dry-run] 會詢問：$1 (y/N)"; return 0; }
+  has_tty || die "需要確認「$1」，但沒有終端機可以輸入。加上 --yes 可略過確認。"
+  local ans
+  printf '%s (y/N) ' "$1" > /dev/tty
+  read -r ans < /dev/tty || ans=""
+  case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+pause() {
+  [ "$ASSUME_YES" = 1 ] || [ "$DRY_RUN" = 1 ] && return 0
+  has_tty || return 0
+  printf '%s' "$1" > /dev/tty
+  read -r _ < /dev/tty || true
+}
+
+# ── 小工具 ───────────────────────────────────────────────────────────────
+has_rosetta()   { arch -x86_64 /usr/bin/true >/dev/null 2>&1; }
+macos_major()   { sw_vers -productVersion | cut -d. -f1; }
+free_gb()       { df -k "$HOME" | awk 'NR==2 {print int($4/1048576)}'; }
+native_steam_running() { pgrep -x steam_osx >/dev/null 2>&1; }
+have_wrapper()  { [ -x "$LAUNCH" ] && [ -f "$PLIST" ]; }
+need_wrapper()  { have_wrapper || die "找不到 wrapper：$WRAPPER。請先執行 winsteam setup。"; }
+
+# 已知檔案的 SHA-256（來自 GitHub release 的 digest）。未知版本回傳空字串。
+known_sha() {
+  case "$1" in
+    WS12WineSikarugir10.0_6.tar.xz) echo 9da7ee0cbf386522f3a9906943726d9c3c125dbbd9ab120e3cde80e88d6091b2 ;;
+    WS12WineSikarugir10.0_8.tar.xz) echo 2a6bcf2a3bf13cddf825599b6bc1e3659cbf71e1282c6d77141a92f6ac8d4c68 ;;
+    WS12WineSikarugir11.0_1.tar.xz) echo 67e29fb3d74f363af39c69ba11f9b13a79812c5db07cf4748672658e4a200a0e ;;
+    Template-1.0.11.tar.xz)         echo 9fa15479e7ff6abd99c1d07be285fb95f41fc6991586502427152b1f7d6ccb8a ;;
+    Template-1.0.27.tar.xz)         echo dd0778f7b553d63df9b0f4e2cda3f3c6c005aabb75588c84d604afe80cdedbb9 ;;
+    *) echo "" ;;
+  esac
+}
+
+sha_ok() { # sha_ok <file> ; 0 = 相符或沒有已知雜湊
+  local want got
+  want="$(known_sha "$(basename "$1")")"
+  [ -n "$want" ] || return 0
+  got="$(shasum -a 256 "$1" | awk '{print $1}')"
+  [ "$want" = "$got" ]
+}
+
+download() { # download <url> <dest>
+  local url="$1" dest="$2" name
+  name="$(basename "$dest")"
+  if [ -f "$dest" ] && sha_ok "$dest"; then
+    ok "已有 $name，略過下載"
+    return 0
+  fi
+  info "下載 $name"
+  info "  ${C_DIM}$url${C_0}"
+  if [ "$DRY_RUN" = 1 ]; then run curl -fL -o "$dest" "$url"; return 0; fi
+  mkdir -p "$(dirname "$dest")"
+  curl -fL --progress-bar -o "$dest.part" "$url" || { rm -f "$dest.part"; die "下載失敗：$url"; }
+  if ! sha_ok "$dest.part"; then
+    rm -f "$dest.part"
+    die "$name 的 SHA-256 與預期不符，已刪除。請重試；若持續發生請勿使用該檔案。"
+  fi
+  mv "$dest.part" "$dest"
+  if [ -z "$(known_sha "$name")" ]; then
+    warn "$name 沒有內建的雜湊可比對（非預設版本或會變動的檔案）"
+  else
+    ok "$name 雜湊相符"
+  fi
+}
+
+# ── Info.plist 讀寫 ──────────────────────────────────────────────────────
+plist_has() { plutil -extract "$1" raw -o - "$PLIST" >/dev/null 2>&1; }
+plist_get() { plutil -extract "$1" raw -o - "$PLIST" 2>/dev/null || true; }
+plist_set_int() { run plutil -replace "$1" -integer "$2" "$PLIST"; }
+plist_set_str() { run plutil -replace "$1" -string "$2" "$PLIST"; }
+# 只在鍵已存在時才寫入，避免對不同版本的範本塞進不認得的鍵。
+plist_set_int_if_present() {
+  if plist_has "$1"; then plist_set_int "$1" "$2"; return 0; fi
+  return 1
+}
+
+wineserver_kill() {
+  have_wrapper || return 0
+  run "$LAUNCH" WSS-wineserverkill >/dev/null 2>&1 || true
+}
+
+# ── 圖形後端 ─────────────────────────────────────────────────────────────
+current_backend() {
+  if   [ "$(plist_get D3DMETAL)" = 1 ]; then echo d3dmetal
+  elif [ "$(plist_get DXMT)" = 1 ];     then echo dxmt
+  elif [ "$(plist_get DXVK)" = 1 ];     then echo dxvk
+  else echo wined3d
+  fi
+}
+
+set_backend() { # set_backend <d3dmetal|dxmt|dxvk|wined3d>
+  local want="$1" key=""
+  case "$want" in
+    d3dmetal) key=D3DMETAL ;;
+    dxmt)     key=DXMT ;;
+    dxvk)     key=DXVK ;;
+    wined3d)  key="" ;;
+    *) die "不認得的後端：$want（可用：d3dmetal、dxmt、dxvk、wined3d）" ;;
+  esac
+  local k
+  for k in D3DMETAL DXMT DXVK; do
+    [ "$k" = "$key" ] && continue
+    plist_set_int_if_present "$k" 0 || true
+  done
+  if [ "$want" = d3dmetal ]; then
+    # 這兩個會和 D3DMetal 衝突
+    plist_set_int_if_present D9VK 0 || true
+    plist_set_int_if_present CNC_DDRAW 0 || true
+  fi
+  [ -n "$key" ] && plist_set_int "$key" 1
+  return 0
+}
+
+# ── 遊戲設定檔 ───────────────────────────────────────────────────────────
+# 設定檔是單純的 KEY=value 文字檔，只讀取、不當成程式執行。
+conf_get() { # conf_get <file> <KEY>
+  sed -n "s/^$2=//p" "$1" | head -n 1 | sed -e 's/^"//' -e 's/"$//'
+}
+
+profile_path() {
+  local name
+  name="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+  [ -n "$name" ] || die "請指定遊戲名稱，例如：winsteam play repo"
+  [ -f "$PROFILES/$name.conf" ] || die "沒有「$1」的設定檔。執行 winsteam games 看有哪些。"
+  echo "$PROFILES/$name.conf"
+}
+
+apply_profile() { # apply_profile <file> [backend-override]
+  local f="$1" backend sync
+  backend="${2:-$(conf_get "$f" BACKEND)}"
+  [ -n "$backend" ] && { set_backend "$backend"; ok "圖形後端：$backend"; }
+  sync="$(conf_get "$f" MSYNC)"
+  if [ -n "$sync" ]; then
+    if plist_set_int_if_present WINEMSYNC "$sync"; then ok "MSync：$sync"
+    elif plist_set_int_if_present WINEESYNC "$sync"; then ok "ESync：$sync（這個範本沒有 MSync 鍵）"
+    else warn "這個範本的 Info.plist 沒有 MSync / ESync 鍵，略過"
+    fi
+  fi
+}
+
+print_tips() {
+  local tips
+  tips="$(conf_get "$1" TIPS)"
+  [ -n "$tips" ] || return 0
+  info ""
+  info "${C_B}小提醒${C_0}"
+  printf '%s\n' "$tips" | tr '|' '\n' | sed 's/^ */  • /'
+}
+
+# ── 指令：doctor ─────────────────────────────────────────────────────────
+cmd_doctor() {
+  local fail=0 major free
+  step "環境檢查"
+  if [ "$(uname -m)" = arm64 ]; then ok "Apple Silicon"; else bad "需要 Apple Silicon（目前是 $(uname -m)）"; fail=1; fi
+
+  major="$(macos_major)"
+  if [ "$major" -ge 28 ]; then
+    warn "macOS $(sw_vers -productVersion)：Apple 自 macOS 28 起不再提供一般用途的 Rosetta 2，這個工具很可能無法運作"
+  elif [ "$major" -ge 14 ]; then ok "macOS $(sw_vers -productVersion)"
+  else bad "需要 macOS 14 以上（目前是 $(sw_vers -productVersion)）"; fail=1
+  fi
+
+  if has_rosetta; then ok "Rosetta 2 已安裝"; else bad "Rosetta 2 未安裝（winsteam setup 會帶你安裝）"; fail=1; fi
+  if command -v brew >/dev/null 2>&1; then ok "Homebrew"; else bad "找不到 Homebrew，請先到 https://brew.sh 安裝"; fail=1; fi
+
+  free="$(free_gb)"
+  if [ "$free" -ge "$MIN_FREE_GB" ]; then ok "可用空間 ${free} GB"
+  else bad "可用空間只有 ${free} GB，至少需要 ${MIN_FREE_GB} GB"; fail=1
+  fi
+
+  step "安裝狀態"
+  if [ -d "/Applications/Sikarugir Creator.app" ]; then ok "Sikarugir Creator"; else warn "Sikarugir Creator 尚未安裝"; fi
+  if have_wrapper; then
+    ok "Wrapper：$WRAPPER"
+    if [ -f "$WRAPPER/Contents/SharedSupport/wine/version" ]; then
+      info "  引擎：$(cat "$WRAPPER/Contents/SharedSupport/wine/version")"
+    fi
+    info "  圖形後端：$(current_backend)"
+    if [ -f "$STEAM_EXE" ]; then ok "Windows 版 Steam 已安裝"; else warn "Wrapper 裡還沒有 Steam"; fi
+  else
+    warn "尚未建立 wrapper（執行 winsteam setup）"
+  fi
+  if native_steam_running; then
+    warn "macOS 版 Steam 正在執行。同一個帳號兩邊同時登入，會讓 Windows 版顯示 NO CONNECTION"
+  fi
+
+  info ""
+  if [ "$fail" = 0 ]; then ok "基本條件都符合"; else bad "有項目未通過，請先處理"; fi
+  return "$fail"
+}
+
+# ── 指令：setup ──────────────────────────────────────────────────────────
+cmd_setup() {
+  local engine_tar="$CACHE/Engines/${ENGINE}.tar.xz"
+  local template_tar="$CACHE/Template/${TEMPLATE}.tar.xz"
+  local steam_setup="$CACHE/SteamSetup.exe"
+
+  step "1/7 檢查環境"
+  [ "$(uname -m)" = arm64 ] || die "需要 Apple Silicon 的 Mac。"
+  [ "$(macos_major)" -ge 14 ] || die "需要 macOS 14 以上。"
+  command -v brew >/dev/null 2>&1 || die "找不到 Homebrew，請先到 https://brew.sh 安裝。"
+  [ "$(free_gb)" -ge "$MIN_FREE_GB" ] || die "可用空間不足，至少需要 ${MIN_FREE_GB} GB。"
+  ok "Apple Silicon、macOS $(sw_vers -productVersion)、Homebrew、可用空間 $(free_gb) GB"
+
+  step "2/7 Rosetta 2"
+  if has_rosetta; then
+    ok "已安裝"
+  else
+    info "Wine 執行的是 x86 程式，需要 Apple 的 Rosetta 2。"
+    info "接下來會顯示 Apple 的授權條款，請自行閱讀並決定是否同意。"
+    confirm "要現在安裝 Rosetta 2 嗎？" || die "已取消。沒有 Rosetta 2 無法繼續。"
+    run softwareupdate --install-rosetta
+    [ "$DRY_RUN" = 1 ] || has_rosetta || die "Rosetta 2 安裝沒有完成。"
+  fi
+
+  step "3/7 Sikarugir Creator"
+  if [ -d "/Applications/Sikarugir Creator.app" ]; then
+    ok "已安裝"
+  else
+    info "Sikarugir 沒有經過 Apple 公證（ad-hoc 簽章），Homebrew 安裝時會移除隔離標記。"
+    confirm "要用 Homebrew 安裝 Sikarugir Creator 嗎？" || die "已取消。"
+    if brew commands --quiet 2>/dev/null | grep -qx trust; then
+      run brew trust Sikarugir-App/sikarugir
+    fi
+    run brew install --cask Sikarugir-App/sikarugir/sikarugir
+  fi
+
+  step "4/7 下載 Wine 引擎與 wrapper 範本"
+  download "$ENGINE_URL" "$engine_tar"
+  download "$TEMPLATE_URL" "$template_tar"
+
+  step "5/7 組裝 wrapper 並建立 Windows 環境"
+  if have_wrapper; then
+    ok "wrapper 已存在，略過組裝"
+  else
+    if [ "$DRY_RUN" = 1 ]; then
+      info "  [dry-run] 解開 $TEMPLATE 與 $ENGINE，組成 $WRAPPER"
+    else
+      [ -e "$WRAPPER" ] && die "$WRAPPER 已存在但不完整。確認後請手動移除再重跑。"
+      local tmp
+      tmp="$(mktemp -d)"
+      tar -xf "$template_tar" -C "$tmp"
+      [ -d "$tmp/${TEMPLATE}.app" ] || { rm -rf "$tmp"; die "範本內容與預期不同（找不到 ${TEMPLATE}.app）。"; }
+      mkdir -p "$(dirname "$WRAPPER")"
+      cp -R "$tmp/${TEMPLATE}.app" "$WRAPPER"
+      tar -xf "$engine_tar" -C "$WRAPPER/Contents/SharedSupport"
+      mv "$WRAPPER/Contents/SharedSupport/wswine.bundle" "$WRAPPER/Contents/SharedSupport/wine"
+      rm -rf "$tmp"
+      ok "wrapper 組裝完成"
+    fi
+  fi
+  if [ -d "$WRAPPER/Contents/drive_c/Program Files (x86)" ]; then
+    ok "Windows 環境已存在"
+  else
+    info "建立 Windows 環境（第一次會花一兩分鐘）…"
+    run "$LAUNCH" WSS-wineprefixcreate
+    if [ "$DRY_RUN" != 1 ]; then
+      [ -d "$WRAPPER/Contents/drive_c/Program Files" ] && [ -d "$WRAPPER/Contents/drive_c/Program Files (x86)" ] \
+        || die "Windows 環境不完整：需要同時有 Program Files 和 Program Files (x86)。"
+      ok "Windows 環境建立完成（64 位元 + WoW64）"
+    fi
+  fi
+
+  step "6/7 安裝 Windows 版 Steam"
+  if [ -f "$STEAM_EXE" ]; then
+    ok "已安裝"
+  else
+    download "$STEAM_SETUP_URL" "$steam_setup"
+    info ""
+    info "${C_B}接下來會跳出 Steam 的安裝精靈，這一步要你自己點：${C_0}"
+    info "  1. 安裝路徑保持預設（C:\\Program Files (x86)\\Steam）"
+    info "  2. 最後一頁${C_B}取消勾選${C_0}「Run Steam」再按 Finish"
+    pause "準備好後按 Enter 開始… "
+    run "$LAUNCH" WSS-installer "$steam_setup"
+    if [ "$DRY_RUN" != 1 ]; then
+      [ -f "$STEAM_EXE" ] || pause "安裝精靈跑完後按 Enter 繼續… "
+      [ -f "$STEAM_EXE" ] || die "找不到 Steam.exe。請確認安裝路徑是預設值，然後重跑 winsteam setup。"
+      ok "Steam 安裝完成"
+    fi
+  fi
+
+  step "7/7 寫入設定"
+  plist_set_str "Program Name and Path" "/$STEAM_REL/Steam.exe"
+  plist_set_int "Skip Gecko" 1
+  plist_set_int "Skip Mono" 1
+  set_backend d3dmetal
+  wineserver_kill
+  ok "啟動目標設為 Steam.exe，圖形後端 D3DMetal"
+
+  info ""
+  ok "${C_B}安裝完成${C_0}"
+  info ""
+  info "下一步："
+  info "  1. 執行 ${C_B}winsteam run${C_0}，在視窗裡登入你自己的 Steam 帳號"
+  info "     （第一次啟動會下載更新，視窗看起來像當掉是正常的，等幾分鐘）"
+  info "  2. 在 Steam 的 設定 → 介面 關掉「在網頁檢視中啟用 GPU 加速算繪」"
+  info "  3. 在 Steam 裡安裝遊戲，之後用 ${C_B}winsteam play <遊戲>${C_0} 啟動"
+  info "     可用的遊戲設定檔：winsteam games"
+}
+
+# ── 指令：run / play ─────────────────────────────────────────────────────
+preflight_launch() {
+  need_wrapper
+  [ -f "$STEAM_EXE" ] || [ "$DRY_RUN" = 1 ] || die "Wrapper 裡還沒有 Steam。請先執行 winsteam setup。"
+  has_rosetta || die "Rosetta 2 未安裝。請先執行 winsteam setup。"
+  if native_steam_running; then
+    warn "macOS 版 Steam 正在執行，會和 Windows 版搶同一個登入（顯示 NO CONNECTION）。"
+    if confirm "要先關閉 macOS 版 Steam 嗎？"; then
+      run osascript -e 'tell application "Steam" to quit' || true
+      [ "$DRY_RUN" = 1 ] || sleep 3
+    fi
+  fi
+}
+
+cmd_run() {
+  preflight_launch
+  plist_has "Program Flags" && plist_set_str "Program Flags" ""
+  run open "$WRAPPER"
+  ok "已啟動 Windows 版 Steam"
+}
+
+cmd_play() {
+  local f name appid backend=""
+  [ $# -ge 1 ] || die "用法：winsteam play <遊戲> [--backend d3dmetal|dxmt|dxvk|wined3d]"
+  f="$(profile_path "$1")"; shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --backend) [ $# -ge 2 ] || die "--backend 後面要接後端名稱"; backend="$2"; shift 2 ;;
+      *) die "不認得的參數：$1" ;;
+    esac
+  done
+  name="$(conf_get "$f" NAME)"; appid="$(conf_get "$f" APPID)"
+  preflight_launch
+
+  step "套用 $name 的設定"
+  # 後端與同步設定是整個 wrapper 共用的，改完要讓 Wine 重新啟動才會生效。
+  wineserver_kill
+  apply_profile "$f" "$backend"
+
+  if [ -n "$appid" ] && plist_has "Program Flags"; then
+    plist_set_str "Program Flags" "-applaunch $appid"
+    run open "$WRAPPER"
+    ok "已啟動 Steam 並要求執行 $name（App ID $appid）"
+  else
+    run open "$WRAPPER"
+    ok "已啟動 Steam，請在收藏庫裡按「執行」開啟 $name"
+  fi
+  print_tips "$f"
+  local alt
+  alt="$(conf_get "$f" BACKEND_ALT)"
+  if [ -n "$alt" ] && [ -z "$backend" ]; then
+    info ""
+    info "如果畫面異常或起不來，換另一個後端試試：winsteam play $(basename "$f" .conf) --backend $alt"
+  fi
+}
+
+# ── 指令：games / backend / hud / status / logs / kill ───────────────────
+cmd_games() {
+  local f found=0
+  printf '%-10s %-12s %-10s %s\n' "指令名稱" "遊戲" "App ID" "預設後端"
+  for f in "$PROFILES"/*.conf; do
+    [ -f "$f" ] || continue
+    found=1
+    printf '%-10s %-12s %-10s %s\n' "$(basename "$f" .conf)" "$(conf_get "$f" NAME)" \
+      "$(conf_get "$f" APPID)" "$(conf_get "$f" BACKEND)"
+  done
+  [ "$found" = 1 ] || warn "在 $PROFILES 找不到任何設定檔"
+}
+
+cmd_backend() {
+  need_wrapper
+  if [ $# -eq 0 ]; then
+    info "目前的圖形後端：$(current_backend)"
+    info "切換：winsteam backend <d3dmetal|dxmt|dxvk|wined3d>"
+    return 0
+  fi
+  wineserver_kill
+  set_backend "$1"
+  ok "圖形後端改為 $1（下次啟動生效）"
+}
+
+cmd_hud() {
+  need_wrapper
+  local v
+  case "${1:-}" in on) v=1 ;; off) v=0 ;; *) die "用法：winsteam hud on|off" ;; esac
+  if plist_set_int_if_present METAL_HUD "$v"; then
+    wineserver_kill
+    ok "Metal 效能 HUD：${1}（下次啟動生效，會顯示 FPS 與畫格時間）"
+  else
+    die "這個範本的 Info.plist 沒有 METAL_HUD 鍵，無法從這裡切換。"
+  fi
+}
+
+cmd_status() {
+  need_wrapper
+  info "Wrapper     $WRAPPER"
+  [ -f "$WRAPPER/Contents/SharedSupport/wine/version" ] && info "引擎        $(cat "$WRAPPER/Contents/SharedSupport/wine/version")"
+  info "圖形後端    $(current_backend)"
+  local k
+  for k in WINEMSYNC WINEESYNC METAL_HUD "Program Flags" "Program Name and Path"; do
+    plist_has "$k" && printf '%-11s %s\n' "$k" "$(plist_get "$k")"
+  done
+  info "佔用空間    $(du -sh "$WRAPPER" 2>/dev/null | awk '{print $1}')"
+}
+
+cmd_logs() {
+  need_wrapper
+  local dir="$WRAPPER/Contents/drive_c/$STEAM_REL/logs"
+  [ -d "$dir" ] || die "還沒有記錄檔：$dir"
+  info "記錄檔資料夾：$dir"
+  local f
+  for f in bootstrap_log.txt connection_log.txt; do
+    [ -f "$dir/$f" ] || continue
+    info ""
+    info "${C_B}── $f（最後 15 行）──${C_0}"
+    tail -n 15 "$dir/$f"
+  done
+}
+
+cmd_kill() {
+  need_wrapper
+  wineserver_kill
+  ok "已結束這個 wrapper 的所有 Wine 程序"
+}
+
+# ── 指令：uninstall ──────────────────────────────────────────────────────
+cmd_uninstall() {
+  local all=0
+  [ "${1:-}" = "--all" ] && all=1
+  case "$WRAPPER" in
+    */*.app) ;;
+    *) die "WRAPPER 路徑看起來不對，拒絕刪除：$WRAPPER" ;;
+  esac
+  if [ -e "$WRAPPER" ]; then
+    warn "這會刪除 $WRAPPER"
+    warn "包含裡面的 Windows 版 Steam 和所有已下載的遊戲（$(du -sh "$WRAPPER" 2>/dev/null | awk '{print $1}')），無法復原。"
+    confirm "確定要刪除嗎？" || die "已取消。"
+    wineserver_kill
+    run rm -rf "$WRAPPER"
+    ok "已刪除 wrapper"
+  else
+    info "沒有 wrapper 需要刪除"
+  fi
+  if [ "$all" = 1 ]; then
+    run rm -rf "$CACHE/Engines" "$CACHE/Template"
+    run rm -f "$CACHE/SteamSetup.exe"
+    ok "已刪除下載的引擎、範本與安裝檔"
+    info "Sikarugir Creator 和 Rosetta 2 沒有動。要移除 Creator：brew uninstall --cask sikarugir"
+  fi
+}
+
+# ── 說明 ─────────────────────────────────────────────────────────────────
+cmd_help() {
+  cat <<EOF
+winsteam $VERSION — 在 Apple Silicon Mac 上跑 Windows 版 Steam
+
+用法：winsteam [--dry-run] [--yes] <指令>
+
+  doctor                 檢查這台 Mac 是否符合條件、目前裝到哪一步
+  setup                  一次裝好：Rosetta 2、Sikarugir、Wine 引擎、Windows 版 Steam
+  run                    啟動 Windows 版 Steam
+  games                  列出內建的遊戲設定檔
+  play <遊戲>            套用該遊戲的最佳設定並啟動（例：winsteam play repo）
+       [--backend 名稱]  這次改用指定的圖形後端
+  backend [名稱]         查看或切換圖形後端：d3dmetal、dxmt、dxvk、wined3d
+  hud on|off             開關 Metal 效能 HUD（看 FPS）
+  status                 顯示目前 wrapper 的設定
+  logs                   顯示 Steam 記錄檔的位置與最後幾行
+  kill                   強制結束卡住的 Wine 程序
+  uninstall [--all]      刪除 wrapper（含遊戲）；--all 連下載的檔案一起刪
+  version                顯示版本
+
+選項：
+  --dry-run              只印出會做什麼，不實際執行
+  --yes                  所有確認都自動回答「是」
+
+你必須已經在自己的 Steam 帳號擁有遊戲。這個工具不處理購買、DRM 或反作弊。
+EOF
+}
+
+# ── 進入點 ───────────────────────────────────────────────────────────────
+main() {
+  local args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) DRY_RUN=1 ;;
+      --yes|-y)  ASSUME_YES=1 ;;
+      *) args+=("$1") ;;
+    esac
+    shift
+  done
+  set -- ${args[@]+"${args[@]}"}
+  local cmd="${1:-help}"
+  [ $# -gt 0 ] && shift
+  if [ "$DRY_RUN" = 1 ]; then
+    warn "乾跑模式：以下只是預演，不會下載、安裝或修改任何東西。"
+    trap 'warn "乾跑結束：上面標示完成的步驟都沒有實際執行。"' EXIT
+  fi
+  case "$cmd" in
+    doctor)    cmd_doctor "$@" ;;
+    setup)     cmd_setup "$@" ;;
+    run)       cmd_run "$@" ;;
+    play)      cmd_play "$@" ;;
+    games)     cmd_games "$@" ;;
+    backend)   cmd_backend "$@" ;;
+    hud)       cmd_hud "$@" ;;
+    status)    cmd_status "$@" ;;
+    logs)      cmd_logs "$@" ;;
+    kill)      cmd_kill "$@" ;;
+    uninstall) cmd_uninstall "$@" ;;
+    version|--version|-v) echo "winsteam $VERSION" ;;
+    help|--help|-h) cmd_help ;;
+    *) bad "不認得的指令：$cmd"; echo; cmd_help; exit 2 ;;
+  esac
+}
+
+main "$@"
