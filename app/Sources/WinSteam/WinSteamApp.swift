@@ -28,8 +28,9 @@ struct WinSteamApp: App {
                 .frame(minWidth: 620, minHeight: 520)
                 .task { await model.refresh() }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                    guard model.loaded, !model.isBusy, !model.checking else { return }
-                    Task { await model.refresh() }
+                    // 回到前景立刻更新一次狀態（例如剛在 Steam 登入或裝完遊戲）
+                    guard model.loaded else { return }
+                    Task { await model.refreshState() }
                 }
         }
         .defaultSize(width: 720, height: 640)

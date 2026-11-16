@@ -13,6 +13,7 @@ enum JobKind: Equatable {
     case logs
     case status
     case uninstall
+    case prefetch
 }
 
 struct Job {
@@ -33,6 +34,8 @@ struct SetupProgress {
     var wizardFallback = false
     /// 目前下載檔案的百分比（curl 進度列）
     var downloadPercent: Int?
+    /// 第 6 步後段：預先下載 Steam 用戶端更新（沒有進度輸出）
+    var prefetching = false
 
     var fraction: Double {
         if succeeded == true || finishing { return 1 }
@@ -44,6 +47,7 @@ struct SetupProgress {
         if finishing { return "安裝好了，正在開啟 Steam…" }
         guard let step = SetupStep.step(currentStep) else { return "準備中…" }
         if currentStep == 4, let p = downloadPercent { return step.message + "（\(p)%）" }
+        if currentStep == 6 && prefetching { return "正在預先下載 Steam 的更新（約 480 MB），之後第一次開啟就不用等很久…" }
         return step.message
     }
 }
@@ -66,6 +70,20 @@ enum Route: Hashable {
     case advanced
 }
 
+/// 首頁現在該顯示什麼。依實際狀態決定，任何時候只有一顆主要按鈕。
+enum HomePhase: Equatable {
+    case loading
+    case notInstalled
+    case installing
+    case failed
+    /// Steam 已裝好，但用戶端還在完成第一次更新
+    case updatingClient
+    /// 用戶端好了，但還沒有登入過
+    case needsLogin
+    /// 登入過：顯示遊戲清單
+    case ready
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -78,25 +96,29 @@ final class AppModel {
 
     private(set) var job: Job?
     var setup = SetupProgress()
-    /// 剛裝好：首頁顯示「請在 Steam 視窗登入」
-    var justInstalled = false
+    /// `winsteam state` 的最新結果；nil = 還沒讀到，或 CLI 太舊沒有 state 指令
+    var steam: SteamState?
     var licensePrompt: LicensePrompt?
     var confirmation: PendingConfirmation?
     var errorMessage: String?
-    /// 已經按過「開始遊戲」的設定檔，顯示它們的小提醒
-    var launchedProfiles: Set<String> = []
+    /// 按過「開始遊戲」的設定檔 → 顯示在該遊戲下方的一句話（之後接小提醒）
+    var launchNotes: [String: String] = [:]
     /// 剛按下、還沒寫進 Info.plist 的值，讓控制項不會跳回舊值
     var pendingBackend: Backend?
     var pendingHUD: Bool?
     private(set) var loaded = false
+    /// 按下「開始遊戲」後、正式執行前（檢查要不要重新啟動 Steam）的那一兩秒
+    private(set) var preparingPlay: String?
 
     @ObservationIgnored private var runner: PTYProcess?
     @ObservationIgnored private var idleTask: Task<Void, Never>?
     @ObservationIgnored private var licenseScanFrom = 0
     @ObservationIgnored private var sawShellError = false
     @ObservationIgnored private var lastErrorLine: String?
+    @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var stateInFlight = false
 
-    var isBusy: Bool { job != nil }
+    var isBusy: Bool { job != nil || preparingPlay != nil }
     var installed: Bool { wrapper.installed }
     var cliAvailable: Bool { Paths.cli != nil }
 
@@ -107,9 +129,53 @@ final class AppModel {
         profiles = GameProfile.loadAll()
     }
 
+    var phase: HomePhase {
+        if !loaded { return .loading }
+        if setup.active { return .installing }
+        if setup.succeeded == false { return .failed }
+        if !installed { return .notInstalled }
+        guard let s = steam else { return .ready }   // 舊版 CLI：沒有 state 可看
+        if !s.clientReady { return .updatingClient }
+        if !s.hasLoggedIn { return .needsLogin }
+        return .ready
+    }
+
+    var steamRunning: Bool { steam?.running == true }
+
+    func gameState(_ profile: GameProfile) -> SteamState.Game {
+        if let g = steam?.games[profile.id] { return g }
+        // 舊版 CLI 沒有 state：維持以前的行為，讓使用者可以按開始遊戲
+        return steam == nil ? SteamState.Game(installed: true) : SteamState.Game()
+    }
+
+    /// 讀 `winsteam state`（只讀檔案與查行程，很輕量）。只有內容改變時才更新畫面。
+    func refreshState() async {
+        guard !stateInFlight, let cli = Paths.cli else { return }
+        stateInFlight = true
+        defer { stateInFlight = false }
+        let r = await CommandCapture.run(cli, ["state"])
+        let new = SteamState.parse(r.output)
+        if new != steam { steam = new }
+        let w = WrapperState.load()
+        if w != wrapper { wrapper = w }
+    }
+
+    /// 在前景時每 3 秒、背景時每 15 秒重新讀一次狀態，使用者在 Steam 登入或裝完遊戲後回來就會看到變化。
+    func startPolling() {
+        guard pollTask == nil else { return }
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(NSApp.isActive ? 3 : 15))
+                await self?.refreshState()
+            }
+        }
+    }
+
     func refresh() async {
         reloadLocal()
+        await refreshState()
         loaded = true
+        startPolling()
         guard let cli = Paths.cli else {
             errorMessage = "找不到 winsteam 命令列工具，請重新下載 WinSteam。"
             return
@@ -159,6 +225,10 @@ final class AppModel {
             if ConsoleModel.isShellError(line) { sawShellError = true; lastErrorLine = line }
             if line.hasPrefix("✗") { lastErrorLine = String(line.dropFirst()).trimmingCharacters(in: .whitespaces) }
         }
+        if case .play(let id) = job?.kind, lines.contains(where: { $0.contains("Steam 已經在執行") }),
+           let name = profiles.first(where: { $0.id == id })?.name {
+            launchNotes[id] = "Steam 已經開著。請在 Steam 收藏庫裡找到 \(name)，按「執行」。"
+        }
         guard job?.kind == .setup else { return }
         for line in lines { observeSetupLine(line) }
         if setup.currentStep == 4 { setup.downloadPercent = Self.percent(in: console.partial) ?? setup.downloadPercent }
@@ -197,19 +267,22 @@ final class AppModel {
                 }
             }
             setup.succeeded = status == 0
-            if status == 0 {
-                justInstalled = true
-            } else if setup.failure == nil {
+            if status != 0 && setup.failure == nil {
                 setup.failure = lastErrorLine ?? "安裝在第 \(max(setup.currentStep, 1)) 步停下來了。"
             }
             setup.failure = setup.failure.map(Self.friendlyFailure)
-        } else if status != 0, let kind, [.openSteam, .backend, .hud, .kill, .uninstall].contains(kind) || isPlay(kind) {
+        } else if status != 0, let kind, [.openSteam, .backend, .hud, .kill, .uninstall, .prefetch].contains(kind) || isPlay(kind) {
             errorMessage = (lastErrorLine ?? "沒有成功。") + "\n\n詳細過程在「進階」的輸出區。"
         }
         completion?(status)
         pendingBackend = nil
         pendingHUD = nil
-        Task { await refresh() }
+        if kind == .setup || kind == .uninstall {
+            Task { await refresh() }
+        } else {
+            reloadLocal()
+            Task { await refreshState() }
+        }
     }
 
     private func isPlay(_ kind: JobKind) -> Bool {
@@ -231,7 +304,6 @@ final class AppModel {
     func install() {
         withNativeSteamCheck("安裝完成後開啟 Windows 版 Steam") { [weak self] _ in
             guard let self else { return }
-            self.justInstalled = false
             self.setup = SetupProgress(active: true)
             self.runCLI(["--yes", "setup"], kind: .setup, title: "安裝中")
         }
@@ -253,6 +325,8 @@ final class AppModel {
                 setup.currentStep = n
                 setup.downloadPercent = nil
             }
+        } else if line.contains("預先下載 Steam 用戶端更新") {
+            setup.prefetching = true
         } else if line.hasPrefix("✓") && line.contains("安裝完成") {
             setup.finishing = true
         } else if line.contains("改用 Steam 的安裝精靈") {
@@ -390,17 +464,52 @@ final class AppModel {
 
     func play(_ profile: GameProfile, backend: Backend? = nil) {
         guard ensureInstalled() else { return }
+        Task { [weak self] in
+            guard let self, self.preparingPlay == nil else { return }
+            self.preparingPlay = profile.id
+            // Steam 開著、而且這款遊戲要的設定和現在不同 → 得重新啟動 Steam，先問使用者
+            let restart = steamRunning ? await needsRestart(profile, backend: backend) : false
+            self.preparingPlay = nil
+            if restart {
+                confirmation = PendingConfirmation(
+                    title: "需要重新啟動 Steam",
+                    message: "這款遊戲要用不同的設定，需要重新啟動 Steam。進行中的下載會暫停，重開後會接續。",
+                    confirmLabel: "重新啟動並開始",
+                    action: { [weak self] in
+                        // 等這個對話框收起來，下一個（例如 macOS 版 Steam 的提醒）才出得來
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { self?.launch(profile, backend: backend) }
+                    })
+            } else {
+                launch(profile, backend: backend)
+            }
+        }
+    }
+
+    /// 用 CLI 自己的判斷（--dry-run 不會改動任何東西），避免 GUI 與 CLI 的規則不一致。
+    private func needsRestart(_ profile: GameProfile, backend: Backend?) async -> Bool {
+        guard let cli = Paths.cli else { return false }
+        var args = ["--dry-run", "play", profile.id]
+        if let backend { args += ["--backend", backend.rawValue] }
+        let r = await CommandCapture.run(cli, args)
+        return r.output.contains("切換設定需要重新啟動 Steam")
+    }
+
+    private func launch(_ profile: GameProfile, backend: Backend?) {
+        launchNotes[profile.id] = nil
         withNativeSteamCheck("開始遊戲") { [weak self] yes in
             var args = (yes ? ["--yes"] : []) + ["play", profile.id]
             if let backend { args += ["--backend", backend.rawValue] }
             self?.runCLI(args, kind: .play(profile.id), title: "開啟 \(profile.name)") { status in
-                if status == 0 { self?.launchedProfiles.insert(profile.id) }
+                guard let self else { return }
+                if status == 0 && self.launchNotes[profile.id] == nil {
+                    self.launchNotes[profile.id] = "已請 Steam 開啟 \(profile.name)，可能要等一下。"
+                }
             }
         }
     }
 
     func dismissTips(_ profile: GameProfile) {
-        launchedProfiles.remove(profile.id)
+        launchNotes[profile.id] = nil
     }
 
     // MARK: 進階
@@ -416,6 +525,8 @@ final class AppModel {
         runCLI(["hud", on ? "on" : "off"], kind: .hud, title: on ? "開啟 Metal HUD" : "關閉 Metal HUD")
     }
 
+    func prefetch() { runCLI(["prefetch"], kind: .prefetch, title: "預先下載 Steam 更新") }
+
     func killWine() { runCLI(["kill"], kind: .kill, title: "結束 Wine 程序") }
     func showLogs() { runCLI(["logs"], kind: .logs, title: "查看記錄") }
     func showStatus() { runCLI(["status"], kind: .status, title: "目前設定") }
@@ -430,9 +541,8 @@ final class AppModel {
     func uninstall(all: Bool) {
         runCLI(["--yes", "uninstall"] + (all ? ["--all"] : []), kind: .uninstall, title: "移除") { [weak self] status in
             if status == 0 {
-                self?.launchedProfiles.removeAll()
+                self?.launchNotes.removeAll()
                 self?.setup = SetupProgress()
-                self?.justInstalled = false
             }
         }
     }

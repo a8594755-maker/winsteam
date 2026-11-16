@@ -7,18 +7,17 @@ struct HomeView: View {
 
     var body: some View {
         Group {
-            if !model.loaded {
-                ProgressView().controlSize(.large)
-            } else if model.setup.active {
-                InstallingView()
-            } else if model.setup.succeeded == false {
-                InstallFailedView()
-            } else if model.installed {
-                GameListView()
-            } else {
-                WelcomeView()
+            switch model.phase {
+            case .loading: ProgressView().controlSize(.large)
+            case .notInstalled: WelcomeView()
+            case .installing: InstallingView()
+            case .failed: InstallFailedView()
+            case .updatingClient: SteamUpdatingView()
+            case .needsLogin: LoginView()
+            case .ready: GameListView()
             }
         }
+        .animation(.easeInOut(duration: 0.2), value: model.phase)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("WinSteam")
@@ -171,7 +170,81 @@ private struct InstallFailedView: View {
     }
 }
 
-// MARK: - 已安裝：遊戲清單
+// MARK: - Steam 第一次更新中
+
+/// 「會自動偵測」的小提示，讓使用者知道不用手動重新整理
+private struct AutoDetectHint: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(text)
+        }
+        .font(.callout)
+        .foregroundStyle(.secondary)
+    }
+}
+
+/// 打開 Steam 的主要按鈕：Steam 已在執行時只把它叫到前面
+private struct OpenSteamButton: View {
+    @Environment(AppModel.self) private var model
+    let title: String
+
+    var body: some View {
+        Button { model.openSteam() } label: {
+            Text(model.steamRunning ? "把 Steam 視窗叫到前面" : title)
+                .font(.title3.weight(.semibold))
+                .frame(minWidth: 200)
+                .padding(.vertical, 4)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.extraLarge)
+        .disabled(model.isBusy)
+        .padding(.top, 6)
+    }
+}
+
+private struct SteamUpdatingView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        CenteredPage {
+            HeroIcon(symbol: "arrow.triangle.2.circlepath")
+            Text("Steam 正在完成第一次更新").font(.largeTitle.weight(.semibold))
+                .multilineTextAlignment(.center)
+            Text(model.steamRunning
+                 ? "Steam 視窗看起來像沒反應是正常的，更新好就會出現登入畫面，通常要幾分鐘。"
+                 : "Steam 第一次開啟要先下載更新。按下面的按鈕開啟 Steam，更新好就會出現登入畫面。")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            OpenSteamButton(title: "開啟 Steam")
+            AutoDetectHint(text: "更新好之後，這裡會自動換到下一步")
+        }
+    }
+}
+
+// MARK: - 還沒登入
+
+private struct LoginView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        CenteredPage {
+            HeroIcon(symbol: "person.crop.circle.fill")
+            Text("登入你的 Steam 帳號").font(.largeTitle.weight(.semibold))
+            Text("在 Steam 視窗用你自己的帳號登入。WinSteam 不會看到你的帳號密碼。")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            OpenSteamButton(title: "開啟 Steam 登入")
+            AutoDetectHint(text: "登入之後，這裡會自動換成遊戲清單")
+        }
+    }
+}
+
+// MARK: - 已登入：遊戲清單
 
 private struct GameListView: View {
     @Environment(AppModel.self) private var model
@@ -179,12 +252,9 @@ private struct GameListView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                if model.justInstalled {
-                    LoginBanner()
-                }
                 VStack(alignment: .leading, spacing: 4) {
                     Text("遊戲").font(.largeTitle.weight(.semibold))
-                    Text("遊戲要先在 Steam 裡用你的帳號安裝好，再回來按「開始遊戲」。")
+                    Text("遊戲要先用你的 Steam 帳號買好並安裝，裝好的遊戲就能直接開始。")
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -196,8 +266,8 @@ private struct GameListView: View {
                 }
 
                 HStack(spacing: 4) {
-                    Text("要登入或在 Steam 安裝遊戲？")
-                    Button("開啟 Steam") { model.openSteam() }
+                    Text(model.steamRunning ? "Steam 正在執行。" : "要買遊戲或管理收藏庫？")
+                    Button(model.steamRunning ? "叫到前面" : "開啟 Steam") { model.openSteam() }
                         .buttonStyle(.link)
                         .disabled(model.isBusy)
                 }
@@ -213,38 +283,14 @@ private struct GameListView: View {
     }
 }
 
-private struct LoginBanner: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "person.crop.circle.badge.checkmark")
-                .font(.title2)
-                .foregroundStyle(.green)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("裝好了！請在 Steam 視窗登入你的帳號").font(.headline)
-                Text("第一次開啟會先下載更新，視窗看起來像沒反應是正常的，等幾分鐘就好。")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-            Button { model.justInstalled = false } label: { Image(systemName: "xmark") }
-                .buttonStyle(.borderless)
-                .help("關閉")
-        }
-        .padding(14)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.green.opacity(0.1)))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.green.opacity(0.3)))
-    }
-}
-
 private struct GameRow: View {
     @Environment(AppModel.self) private var model
     let profile: GameProfile
 
-    private var isLaunching: Bool { model.job?.kind == .play(profile.id) }
+    private var isLaunching: Bool { model.job?.kind == .play(profile.id) || model.preparingPlay == profile.id }
 
     var body: some View {
+        let g = model.gameState(profile)
         Card(padding: 14) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 14) {
@@ -253,7 +299,9 @@ private struct GameRow: View {
                         .foregroundStyle(.white)
                         .frame(width: 42, height: 42)
                         .background(RoundedRectangle(cornerRadius: 10)
-                            .fill(profile.experimental ? Color.orange.gradient : Color.accentColor.gradient))
+                            .fill(g.installed
+                                  ? (profile.experimental ? Color.orange.gradient : Color.accentColor.gradient)
+                                  : Color.gray.gradient))
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 8) {
                             Text(profile.name).font(.title3.weight(.semibold))
@@ -261,27 +309,48 @@ private struct GameRow: View {
                                 Badge(text: "實驗性").help("還沒確認能在 Mac 上順利玩")
                             }
                         }
-                        if profile.experimental {
-                            Text("還沒確認能在 Mac 上順利玩").font(.callout).foregroundStyle(.secondary)
-                        }
+                        Text(statusLine(g))
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 12)
-                    Button { model.play(profile) } label: {
-                        HStack(spacing: 6) {
-                            if isLaunching { ProgressView().controlSize(.small) }
-                            Text("開始遊戲").fontWeight(.semibold)
-                        }
-                        .frame(minWidth: 96)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(model.isBusy)
+                    actionButton(g)
                 }
 
-                if model.launchedProfiles.contains(profile.id) {
-                    LaunchedTips(profile: profile)
+                if g.installed, let note = model.launchNotes[profile.id] {
+                    LaunchedTips(profile: profile, note: note)
                 }
             }
+        }
+    }
+
+    private func statusLine(_ g: SteamState.Game) -> String {
+        if g.installed {
+            return profile.experimental ? "已安裝・還沒確認能在 Mac 上順利玩" : "已安裝"
+        }
+        if g.installing { return "下載中，請在 Steam 查看進度" }
+        return "尚未安裝。帳號擁有這款遊戲的話，在 Steam 收藏庫找到它按「安裝」。"
+    }
+
+    @ViewBuilder private func actionButton(_ g: SteamState.Game) -> some View {
+        if g.installed {
+            Button { model.play(profile) } label: {
+                HStack(spacing: 6) {
+                    if isLaunching { ProgressView().controlSize(.small) }
+                    Text("開始遊戲").fontWeight(.semibold)
+                }
+                .frame(minWidth: 104)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(model.isBusy)
+        } else {
+            Button { model.openSteam() } label: {
+                Text(g.installing ? "開啟 Steam" : "到 Steam 安裝").frame(minWidth: 104)
+            }
+            .controlSize(.large)
+            .disabled(model.isBusy)
         }
     }
 }
@@ -289,11 +358,12 @@ private struct GameRow: View {
 private struct LaunchedTips: View {
     @Environment(AppModel.self) private var model
     let profile: GameProfile
+    let note: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text("已請 Steam 開啟 \(profile.name)，可能要等一下。").font(.callout.weight(.semibold))
+                Text(note).font(.callout.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 Button { model.dismissTips(profile) } label: { Image(systemName: "xmark") }
                     .buttonStyle(.borderless)
