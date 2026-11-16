@@ -90,6 +90,8 @@ EOF
 echo "$*" >> "$SB/log/pgrep.log"
 case "$*" in
   *steam_osx*) [ -e "$SB/state/native_steam" ] && exit 0 ;;
+  # 啟動器與 wineserver 分開控制：state/wrapper_running 是啟動器，state/wineserver_running 是 wineserver
+  *SharedSupport/wine/*) [ -e "$SB/state/wineserver_running" ] && exit 0 ;;
   *Sikarugir*) [ -e "$SB/state/wrapper_running" ] && exit 0 ;;
 esac
 exit 1

@@ -260,6 +260,24 @@ t_play_already_applied_steam_running() { # 設定已符合且 Steam 正在跑：
   assert_out_contains "Steam 已經在執行"
 }
 
+t_play_launcher_gone_but_wine_running() { # 啟動器已結束但 wineserver 還在（Steam 自己重啟過）：仍視為執行中，不動它
+  make_wrapper
+  _apply_repo_settings
+  : > "$SB/state/wineserver_running"
+  ws play repo
+  assert_status 0
+  assert_not_exists "$SB/log/sikarugir.log"
+  assert_key "Program Flags" "-old-flag"
+  assert_out_contains "Steam 已經在執行"
+}
+
+t_state_running_when_only_wineserver() { # state 的 running 在只有 wineserver 時也是 1
+  make_wrapper
+  : > "$SB/state/wineserver_running"
+  ws state
+  assert_stdout_line 'running=1'
+}
+
 t_play_change_needed_steam_running() { # 設定不同且 Steam 正在跑：先警告，再結束 wineserver 並套用
   make_wrapper
   : > "$SB/state/wrapper_running"

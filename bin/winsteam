@@ -272,7 +272,13 @@ backend_is_set() { # backend_is_set <d3dmetal|dxmt|dxvk|wined3d>
   return 0
 }
 
-wrapper_running() { pgrep -f "$LAUNCH" >/dev/null 2>&1; }
+# wrapper 裡有沒有東西在跑。不能只看啟動器（Contents/MacOS/Sikarugir）：
+# Steam 更新後會自己重新啟動，啟動器跟著結束，但 Steam 和遊戲其實還在。
+# 所以也要看這個 wrapper 專屬的 wineserver。
+wrapper_running() {
+  pgrep -f "$LAUNCH" >/dev/null 2>&1 \
+    || pgrep -f "$WRAPPER/Contents/SharedSupport/wine/" >/dev/null 2>&1
+}
 
 # 結束 Wine 後 wrapper 要一點時間才會真的退出；太早 open 只會把快關掉的那個叫到前面。
 wait_wrapper_exit() {
