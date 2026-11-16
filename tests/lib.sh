@@ -85,9 +85,13 @@ echo "$*" >> "$SB/log/arch.log"
 exit 0
 EOF
   # macOS 版 Steam：預設沒在跑；touch $SB/state/native_steam 改成在跑
+  # wrapper（Windows 版 Steam）：預設沒在跑；touch $SB/state/wrapper_running 改成在跑
   _fake pgrep <<'EOF'
 echo "$*" >> "$SB/log/pgrep.log"
-[ -e "$SB/state/native_steam" ] && exit 0
+case "$*" in
+  *steam_osx*) [ -e "$SB/state/native_steam" ] && exit 0 ;;
+  *Sikarugir*) [ -e "$SB/state/wrapper_running" ] && exit 0 ;;
+esac
 exit 1
 EOF
   for c in open osascript softwareupdate; do

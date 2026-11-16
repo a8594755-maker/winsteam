@@ -234,6 +234,53 @@ t_play_case_insensitive() { # play 的遊戲名稱不分大小寫
   assert_key "Program Flags" "-applaunch 3241660"
 }
 
+_apply_repo_settings() { # 把模擬 wrapper 設成 repo 設定檔要的樣子
+  pset_int D3DMETAL 0; pset_int DXMT 1; pset_int DXVK 0; pset_int WINEMSYNC 1
+}
+
+t_play_already_applied() { # 設定已符合且 Steam 沒在跑：不結束 wineserver，照常帶 App ID 啟動
+  make_wrapper
+  _apply_repo_settings
+  ws play repo
+  assert_status 0
+  assert_not_exists "$SB/log/sikarugir.log"
+  assert_key "Program Flags" "-applaunch 3241660"
+  assert_eq "$WRAPPER" "$(cat "$SB/log/open.log" 2>/dev/null)" "open 的參數"
+  assert_out_contains "不需要重新啟動"
+}
+
+t_play_already_applied_steam_running() { # 設定已符合且 Steam 正在跑：完全不動它，只叫到前面
+  make_wrapper
+  _apply_repo_settings
+  : > "$SB/state/wrapper_running"
+  ws play repo
+  assert_status 0
+  assert_not_exists "$SB/log/sikarugir.log"
+  assert_key "Program Flags" "-old-flag"
+  assert_out_contains "Steam 已經在執行"
+}
+
+t_play_change_needed_steam_running() { # 設定不同且 Steam 正在跑：先警告，再結束 wineserver 並套用
+  make_wrapper
+  : > "$SB/state/wrapper_running"
+  ws play repo
+  assert_status 0
+  assert_out_contains "需要重新啟動 Steam"
+  grep -qx WSS-wineserverkill "$SB/log/sikarugir.log" 2>/dev/null || _fail "應結束 wineserver"
+  assert_backend_keys 0 1 0
+}
+
+t_backend_same_no_kill() { # backend 指定的就是目前的後端：不結束 wineserver、不改 Info.plist
+  make_wrapper
+  _apply_repo_settings
+  before="$(plist_sum)"
+  ws backend dxmt
+  assert_status 0
+  assert_out_contains "沒有變更"
+  assert_not_exists "$SB/log/sikarugir.log"
+  assert_eq "$before" "$(plist_sum)" "Info.plist 不應變更"
+}
+
 t_play_backend_override() { # play repo --backend dxvk：覆寫設定檔的後端
   make_wrapper
   ws play repo --backend dxvk

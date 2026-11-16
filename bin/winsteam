@@ -189,6 +189,35 @@ set_backend() { # set_backend <d3dmetal|dxmt|dxvk|wined3d>
   return 0
 }
 
+# Info.plist 是否已經完全是這個後端的設定（是的話就不必重新啟動 Wine）。
+backend_is_set() { # backend_is_set <d3dmetal|dxmt|dxvk|wined3d>
+  local want="$1" k v
+  for k in D3DMETAL DXMT DXVK; do
+    v=0
+    case "$want:$k" in d3dmetal:D3DMETAL|dxmt:DXMT|dxvk:DXVK) v=1 ;; esac
+    if plist_has "$k"; then
+      [ "$(plist_get "$k")" = "$v" ] || return 1
+    else
+      [ "$v" = 0 ] || return 1
+    fi
+  done
+  if [ "$want" = d3dmetal ]; then
+    for k in D9VK CNC_DDRAW; do
+      if plist_has "$k"; then [ "$(plist_get "$k")" = 0 ] || return 1; fi
+    done
+  fi
+  return 0
+}
+
+wrapper_running() { pgrep -f "$LAUNCH" >/dev/null 2>&1; }
+
+# 結束 Wine 後 wrapper 要一點時間才會真的退出；太早 open 只會把快關掉的那個叫到前面。
+wait_wrapper_exit() {
+  local i=0
+  while wrapper_running && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
+  return 0
+}
+
 # ── 遊戲設定檔 ───────────────────────────────────────────────────────────
 # 設定檔是單純的 KEY=value 文字檔，只讀取、不當成程式執行。
 conf_get() { # conf_get <file> <KEY>
@@ -214,6 +243,22 @@ apply_profile() { # apply_profile <file> [backend-override]
     else warn "這個範本的 Info.plist 沒有 MSync / ESync 鍵，略過"
     fi
   fi
+}
+
+# 設定檔要的後端與同步設定是否都已經在 Info.plist 裡了。
+profile_is_applied() { # profile_is_applied <file> [backend-override]
+  local f="$1" backend sync
+  backend="${2:-$(conf_get "$f" BACKEND)}"
+  if [ -n "$backend" ]; then backend_is_set "$backend" || return 1; fi
+  sync="$(conf_get "$f" MSYNC)"
+  if [ -n "$sync" ]; then
+    if plist_has WINEMSYNC; then
+      [ "$(plist_get WINEMSYNC)" = "$sync" ] || return 1
+    elif plist_has WINEESYNC; then
+      [ "$(plist_get WINEESYNC)" = "$sync" ] || return 1
+    fi
+  fi
+  return 0
 }
 
 print_tips() {
@@ -447,9 +492,24 @@ cmd_play() {
   preflight_launch
 
   step "套用 $name 的設定"
-  # 後端與同步設定是整個 wrapper 共用的，改完要讓 Wine 重新啟動才會生效。
-  wineserver_kill
-  apply_profile "$f" "$backend"
+  if profile_is_applied "$f" "$backend"; then
+    ok "設定已經符合，不需要重新啟動 Wine"
+    if wrapper_running; then
+      # Steam 已經開著：不要動它（可能正在下載），只把視窗叫到前面。
+      run open "$WRAPPER"
+      ok "Steam 已經在執行，請在收藏庫裡按「執行」開啟 $name"
+      print_tips "$f"
+      return 0
+    fi
+  else
+    # 後端與同步設定是整個 wrapper 共用的，改完要讓 Wine 重新啟動才會生效。
+    if wrapper_running; then
+      warn "切換設定需要重新啟動 Steam；進行中的下載會暫停，重開後會接續。"
+    fi
+    wineserver_kill
+    [ "$DRY_RUN" = 1 ] || wait_wrapper_exit
+    apply_profile "$f" "$backend"
+  fi
 
   if [ -n "$appid" ] && plist_has "Program Flags"; then
     plist_set_str "Program Flags" "-applaunch $appid"
@@ -490,6 +550,13 @@ cmd_backend() {
   fi
   # 先檢查名稱再結束 Wine，打錯字不該把正在跑的遊戲關掉。
   check_backend "$1"
+  if backend_is_set "$1"; then
+    ok "圖形後端已經是 $1，沒有變更"
+    return 0
+  fi
+  if wrapper_running; then
+    warn "切換後端需要重新啟動 Steam；進行中的下載會暫停，重開後會接續。"
+  fi
   wineserver_kill
   set_backend "$1"
   ok "圖形後端改為 $1（下次啟動生效）"
