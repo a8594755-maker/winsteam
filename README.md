@@ -4,7 +4,7 @@
 
 一個指令裝好 Rosetta 2、Sikarugir（Wine wrapper）、Wine 引擎和 Windows 版 Steam，再用內建的遊戲設定檔切換圖形後端與同步設定。免費，不需要 CrossOver 授權。
 
-> **狀態：v0.1.0，早期版本。** `setup` 已在 M2 MacBook Air（16 GB、macOS 27.0.1）上實機跑通：Rosetta 2、引擎與範本下載、wrapper 組裝、Windows 環境、Steam 靜默安裝都成功，Steam 用戶端可以啟動並開始自我更新。登入後的使用與遊戲實際執行尚未驗證。
+> **狀態：v0.1.0，早期版本。** 已在一台 M2 MacBook Air（16 GB、macOS 27.0.1）上實機驗證：安裝流程每個步驟都成功，Steam 可以登入、下載遊戲，R.E.P.O. 與 MIMESIS 都能啟動遊玩。尚未驗證的：在一台全新的 Mac 上不中斷地從頭跑完 `setup`、其他機型與 macOS 版本、實際 FPS。
 
 ## 需求
 
@@ -54,6 +54,8 @@ winsteam setup
 | `winsteam status` | 顯示目前的設定 |
 | `winsteam logs` | 顯示 Steam 記錄檔 |
 | `winsteam kill` | 強制結束卡住的 Wine 程序 |
+| `winsteam prefetch` | 用較快的官方主機預先下載 Steam 用戶端更新（`setup` 會自動做） |
+| `winsteam state` | 輸出機器可讀的狀態，給圖形介面使用 |
 | `winsteam uninstall` | 刪除 wrapper，包含裡面的 Steam 和遊戲 |
 
 任何指令前面加 `--dry-run` 都只會印出要做的事，不會真的執行。
@@ -62,8 +64,10 @@ winsteam setup
 
 | 指令名稱 | 遊戲 | 預設後端 | 狀況 |
 |---|---|---|---|
-| `repo` | R.E.P.O. | DXMT | 預期可玩。CodeWeavers 評「Runs Great」、ProtonDB Platinum |
-| `mimesis` | MIMESIS | D3DMetal | **實驗性。** ProtonDB Gold，但 CodeWeavers 在 Mac 上回報「Installs, Will Not Run」 |
+| `repo` | R.E.P.O. | DXMT | 實測可玩（M2 Air，macOS 27）。CodeWeavers 評「Runs Great」、ProtonDB Platinum |
+| `mimesis` | MIMESIS | DXMT | 實測可玩（M2 Air，macOS 27），麥克風可用。ProtonDB Gold |
+
+兩款用同一個圖形後端，所以玩完一款換另一款不需要重新啟動 Steam。
 
 沒有設定檔的遊戲也能玩：`winsteam run` 開 Steam 後照常安裝、執行即可。使用核心層反作弊的遊戲（例如 Vanguard）無法在任何 Wine 方案下執行。
 
@@ -81,6 +85,19 @@ TIPS="第一條提醒|第二條提醒"
 ```
 
 `APPID` 是 Steam 商店網址裡的數字。歡迎把測過的設定檔用 PR 送回來。
+
+## 下載為什麼這麼快
+
+第一次安裝要下載約 730 MB。其中兩個來源在某些網路上單一連線只有每秒 0.1 到 0.4 MB，所以 winsteam 做了兩件事：
+
+- **Steam 用戶端更新（約 480 MB）**：Steam 自己寫死的下載主機可能很慢。`setup` 會先從 Valve 放在 Akamai / Cloudflare 的同一批檔案抓好，逐一比對大小與 SHA-256 後放進 Steam 的 `package` 資料夾，Steam 核對後直接採用。
+- **Wine 引擎與 wrapper 範本（約 250 MB，來自 GitHub）**：切成 8 段同時下載再接起來，並比對內建的 SHA-256。設 `WINSTEAM_CONNECTIONS=1` 可以關掉。
+
+任何一步失敗都會自動退回原本的下載方式。
+
+## 圖形介面
+
+`app/` 是原生的 macOS App（WinSteam），把上面的指令包成按鈕。編譯方式見 [app/README.md](app/README.md)。
 
 ## 效能調校
 

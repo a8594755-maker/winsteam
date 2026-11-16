@@ -217,14 +217,25 @@ t_play_repo() { # play repo：後端 dxmt、MSync 1、Program Flags 帶 App ID�
   assert_out_contains "winsteam play repo --backend d3dmetal"   # BACKEND_ALT 提示
 }
 
-t_play_mimesis() { # play mimesis：後端 d3dmetal，D9VK 與 CNC_DDRAW 歸零
+t_play_mimesis() { # play mimesis：後端 dxmt（與 repo 相同），Program Flags 帶 App ID
   make_wrapper
   ws play mimesis
   assert_status 0
-  assert_backend_keys 1 0 0
-  assert_key D9VK 0
-  assert_key CNC_DDRAW 0
+  assert_backend_keys 0 1 0
   assert_key "Program Flags" "-applaunch 2827200"
+  assert_out_contains "winsteam play mimesis --backend d3dmetal"   # BACKEND_ALT 提示
+}
+
+t_play_switch_games_no_restart() { # repo 與 mimesis 設定相同：玩完一款換另一款不需要重啟 Wine
+  make_wrapper
+  ws play repo
+  assert_status 0
+  rm -f "$SB/log/sikarugir.log"
+  : > "$SB/state/wineserver_running"
+  ws play mimesis
+  assert_status 0
+  assert_not_exists "$SB/log/sikarugir.log"
+  assert_out_contains "不需要重新啟動"
 }
 
 t_play_case_insensitive() { # play 的遊戲名稱不分大小寫
