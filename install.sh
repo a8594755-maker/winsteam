@@ -20,7 +20,7 @@ case "$DEST" in
   *) fail "WINSTEAM_HOME 必須在家目錄底下：$DEST" ;;
 esac
 
-say "下載 winsteam（$REPO@$BRANCH）…"
+say "下載 winsteam（$REPO@${BRANCH}）…"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 curl -fsSL "https://github.com/$REPO/archive/refs/heads/$BRANCH.tar.gz" -o "$tmp/src.tar.gz" \

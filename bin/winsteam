@@ -88,7 +88,7 @@ macos_major()   { sw_vers -productVersion | cut -d. -f1; }
 free_gb()       { df -k "$HOME" | awk 'NR==2 {print int($4/1048576)}'; }
 native_steam_running() { pgrep -x steam_osx >/dev/null 2>&1; }
 have_wrapper()  { [ -x "$LAUNCH" ] && [ -f "$PLIST" ]; }
-need_wrapper()  { have_wrapper || die "找不到 wrapper：$WRAPPER。請先執行 winsteam setup。"; }
+need_wrapper()  { have_wrapper || die "找不到 wrapper：${WRAPPER}。請先執行 winsteam setup。"; }
 
 # 已知檔案的 SHA-256（來自 GitHub release 的 digest）。未知版本回傳空字串。
 known_sha() {
@@ -114,7 +114,7 @@ download() { # download <url> <dest>
   local url="$1" dest="$2" name
   name="$(basename "$dest")"
   if [ -f "$dest" ] && sha_ok "$dest"; then
-    ok "已有 $name，略過下載"
+    ok "已有 ${name}，略過下載"
     return 0
   fi
   info "下載 $name"
@@ -159,6 +159,13 @@ current_backend() {
   fi
 }
 
+check_backend() {
+  case "$1" in
+    d3dmetal|dxmt|dxvk|wined3d) ;;
+    *) die "不認得的後端：$1（可用：d3dmetal、dxmt、dxvk、wined3d）" ;;
+  esac
+}
+
 set_backend() { # set_backend <d3dmetal|dxmt|dxvk|wined3d>
   local want="$1" key=""
   case "$want" in
@@ -166,7 +173,7 @@ set_backend() { # set_backend <d3dmetal|dxmt|dxvk|wined3d>
     dxmt)     key=DXMT ;;
     dxvk)     key=DXVK ;;
     wined3d)  key="" ;;
-    *) die "不認得的後端：$want（可用：d3dmetal、dxmt、dxvk、wined3d）" ;;
+    *) die "不認得的後端：${want}（可用：d3dmetal、dxmt、dxvk、wined3d）" ;;
   esac
   local k
   for k in D3DMETAL DXMT DXVK; do
@@ -203,7 +210,7 @@ apply_profile() { # apply_profile <file> [backend-override]
   sync="$(conf_get "$f" MSYNC)"
   if [ -n "$sync" ]; then
     if plist_set_int_if_present WINEMSYNC "$sync"; then ok "MSync：$sync"
-    elif plist_set_int_if_present WINEESYNC "$sync"; then ok "ESync：$sync（這個範本沒有 MSync 鍵）"
+    elif plist_set_int_if_present WINEESYNC "$sync"; then ok "ESync：${sync}（這個範本沒有 MSync 鍵）"
     else warn "這個範本的 Info.plist 沒有 MSync / ESync 鍵，略過"
     fi
   fi
@@ -332,7 +339,7 @@ cmd_setup() {
     ok "wrapper 已存在，略過組裝"
   else
     if [ "$DRY_RUN" = 1 ]; then
-      info "  [dry-run] 解開 $TEMPLATE 與 $ENGINE，組成 $WRAPPER"
+      info "  [dry-run] 解開 $TEMPLATE 與 ${ENGINE}，組成 $WRAPPER"
     else
       [ -e "$WRAPPER" ] && die "$WRAPPER 已存在但不完整。確認後請手動移除再重跑。"
       local tmp
@@ -436,6 +443,7 @@ cmd_play() {
     esac
   done
   name="$(conf_get "$f" NAME)"; appid="$(conf_get "$f" APPID)"
+  if [ -n "$backend" ]; then check_backend "$backend"; fi
   preflight_launch
 
   step "套用 $name 的設定"
@@ -446,7 +454,7 @@ cmd_play() {
   if [ -n "$appid" ] && plist_has "Program Flags"; then
     plist_set_str "Program Flags" "-applaunch $appid"
     run open "$WRAPPER"
-    ok "已啟動 Steam 並要求執行 $name（App ID $appid）"
+    ok "已啟動 Steam 並要求執行 ${name}（App ID ${appid}）"
   else
     run open "$WRAPPER"
     ok "已啟動 Steam，請在收藏庫裡按「執行」開啟 $name"
@@ -480,6 +488,8 @@ cmd_backend() {
     info "切換：winsteam backend <d3dmetal|dxmt|dxvk|wined3d>"
     return 0
   fi
+  # 先檢查名稱再結束 Wine，打錯字不該把正在跑的遊戲關掉。
+  check_backend "$1"
   wineserver_kill
   set_backend "$1"
   ok "圖形後端改為 $1（下次啟動生效）"
@@ -518,7 +528,7 @@ cmd_logs() {
   for f in bootstrap_log.txt connection_log.txt; do
     [ -f "$dir/$f" ] || continue
     info ""
-    info "${C_B}── $f（最後 15 行）──${C_0}"
+    info "${C_B}── ${f}（最後 15 行）──${C_0}"
     tail -n 15 "$dir/$f"
   done
 }
@@ -546,6 +556,10 @@ cmd_uninstall() {
     ok "已刪除 wrapper"
   else
     info "沒有 wrapper 需要刪除"
+    # 沒有 wrapper 時上面的確認不會出現，刪下載檔之前要另外問一次。
+    if [ "$all" = 1 ]; then
+      confirm "要刪除下載的引擎、範本與安裝檔嗎？" || die "已取消。"
+    fi
   fi
   if [ "$all" = 1 ]; then
     run rm -rf "$CACHE/Engines" "$CACHE/Template"
