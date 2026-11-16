@@ -312,6 +312,91 @@ cmd_doctor() {
   return "$fail"
 }
 
+# ── Steam 用戶端套件預先下載 ─────────────────────────────────────────────
+# Steam 第一次啟動會自己下載用戶端更新，而且分兩個階段（先 32 位元、再 64 位元），
+# 合計約 480 MB。它寫死的下載主機在某些網路上只有每秒 0.1 MB 左右，
+# 但 Valve 放在 Akamai / Cloudflare 的同一批檔案可以快上幾十倍。
+# 所以先把套件抓進 Steam 的 package 資料夾：Steam 核對大小後會直接採用，不再下載。
+STEAM_CDN_FAST="${WINSTEAM_STEAM_CDN:-https://cdn.akamai.steamstatic.com/client https://cdn.cloudflare.steamstatic.com/client}"
+
+# 把 Steam 的套件清單（VDF）轉成每行「檔名 大小 sha256」。有壓縮版（zipvz）就用壓縮版。
+steam_manifest_packages() { # steam_manifest_packages <清單檔>
+  awk -F'"' '
+    $2 == "file"   { file = $4 }
+    $2 == "size"   { size = $4 }
+    $2 == "sha2"   { sha = $4 }
+    $2 == "zipvz"  { vz = $4 }
+    $2 == "sha2vz" { shavz = $4 }
+    /^[[:space:]]*}/ {
+      if (file != "") {
+        if (vz != "") { n = split(vz, a, "_"); print vz, a[n], shavz }
+        else          { print file, size, sha }
+      }
+      file = ""; size = ""; sha = ""; vz = ""; shavz = ""
+    }
+  ' "$1"
+}
+
+prefetch_steam_packages() {
+  local pkgdir="$WRAPPER/Contents/drive_c/$STEAM_REL/package"
+  local tmp m base name size sha got fetched=0 bytes=0 failed=0
+  if [ "$DRY_RUN" = 1 ]; then
+    info "  [dry-run] 從 Valve 的 Akamai / Cloudflare 主機預先下載 Steam 用戶端套件到 package 資料夾"
+    return 0
+  fi
+  info "預先下載 Steam 用戶端更新（約 480 MB，走比較快的官方主機）…"
+  mkdir -p "$pkgdir"
+  tmp="$(mktemp -d)"
+  for m in steam_client_win32 steam_client_win64; do
+    for base in $STEAM_CDN_FAST; do
+      curl -fsSL --max-time 30 -o "$tmp/$m" "$base/$m" 2>/dev/null && break
+      rm -f "$tmp/$m"
+    done
+    if [ ! -s "$tmp/$m" ]; then failed=$((failed + 1)); continue; fi
+    steam_manifest_packages "$tmp/$m" > "$tmp/$m.list"
+    while read -r name size sha; do
+      [ -n "$name" ] && [ -n "$size" ] || continue
+      case "$name" in */*|.*) continue ;; esac   # 檔名只能是單純的檔名
+      if [ -f "$pkgdir/$name" ] && [ "$(stat -f %z "$pkgdir/$name")" = "$size" ]; then continue; fi
+      got=""
+      for base in $STEAM_CDN_FAST; do
+        if curl -fsSL --retry 2 -o "$tmp/part" "$base/$name" 2>/dev/null \
+           && [ "$(stat -f %z "$tmp/part")" = "$size" ]; then
+          got="$(shasum -a 256 "$tmp/part" | awk '{print $1}')"
+          break
+        fi
+      done
+      # 大小或雜湊不對就丟掉，讓 Steam 自己下載那一個。
+      if [ -n "$got" ] && { [ -z "$sha" ] || [ "$got" = "$sha" ]; }; then
+        mv "$tmp/part" "$pkgdir/$name"
+        fetched=$((fetched + 1)); bytes=$((bytes + size))
+      else
+        rm -f "$tmp/part"; failed=$((failed + 1))
+      fi
+    done < "$tmp/$m.list"
+  done
+  rm -rf "$tmp"
+  if [ "$fetched" -gt 0 ]; then ok "預先下載了 $fetched 個套件，共 $((bytes / 1048576)) MB，雜湊都相符"; fi
+  if [ "$failed" -gt 0 ]; then
+    warn "有 $failed 項沒有預先下載成功，Steam 啟動時會自己補（可能比較慢）"
+  elif [ "$fetched" = 0 ]; then
+    ok "Steam 用戶端套件都已經在了"
+  fi
+  return 0
+}
+
+cmd_prefetch() {
+  need_wrapper
+  [ -f "$STEAM_EXE" ] || [ "$DRY_RUN" = 1 ] || die "Wrapper 裡還沒有 Steam。請先執行 winsteam setup。"
+  if wrapper_running; then
+    warn "Steam 正在執行，要先關掉它才能換成預先下載的套件。"
+    wineserver_kill
+    [ "$DRY_RUN" = 1 ] || wait_wrapper_exit
+  fi
+  prefetch_steam_packages
+  info "完成後執行 winsteam run 開啟 Steam。"
+}
+
 # ── 指令：setup ──────────────────────────────────────────────────────────
 # Steam 的安裝檔是 NSIS，/S 會靜默裝到預設路徑，而且不會在結束時自動啟動 Steam。
 # 透過 wrapper 平常啟動程式的同一條路（Info.plist 的目標程式 + 參數）執行，
@@ -430,6 +515,10 @@ cmd_setup() {
       fi
       ok "Steam 安裝完成"
     fi
+  fi
+  # 用戶端還沒更新到最新版時，先用快的主機把更新抓好，第一次啟動就不用等很久。
+  if [ ! -f "$WRAPPER/Contents/drive_c/$STEAM_REL/package/steam_client_win64.installed" ]; then
+    prefetch_steam_packages
   fi
 
   step "7/7 寫入設定"
@@ -606,6 +695,32 @@ cmd_kill() {
   ok "已結束這個 wrapper 的所有 Wine 程序"
 }
 
+# ── 指令：state ──────────────────────────────────────────────────────────
+# 給圖形介面等程式讀的狀態，每行 key=value，鍵名固定為 ASCII。
+#   has_logged_in 看的是 Steam 記住的帳號（config/loginusers.vdf），
+#   代表「這份 Steam 曾經登入過」，不保證此刻仍是登入狀態。
+#   game.<名稱>.installed 看 steamapps/appmanifest_<AppID>.acf 的 StateFlags 是否為 4（完整安裝）。
+cmd_state() {
+  local sdir="$WRAPPER/Contents/drive_c/$STEAM_REL"
+  local w=0 si=0 cr=0 rn=0 li=0 f id appid acf inst part
+  if have_wrapper; then w=1; fi
+  if [ "$w" = 1 ] && [ -f "$STEAM_EXE" ]; then si=1; fi
+  if [ "$si" = 1 ] && [ -f "$sdir/package/steam_client_win64.installed" ]; then cr=1; fi
+  if [ "$w" = 1 ] && wrapper_running; then rn=1; fi
+  if [ "$si" = 1 ] && grep -q '"7656[0-9]*"' "$sdir/config/loginusers.vdf" 2>/dev/null; then li=1; fi
+  printf 'wrapper=%s\nsteam_installed=%s\nclient_ready=%s\nrunning=%s\nhas_logged_in=%s\n' "$w" "$si" "$cr" "$rn" "$li"
+  for f in "$PROFILES"/*.conf; do
+    [ -f "$f" ] || continue
+    id="$(basename "$f" .conf)"; appid="$(conf_get "$f" APPID)"
+    inst=0; part=0
+    acf="$sdir/steamapps/appmanifest_${appid}.acf"
+    if [ "$si" = 1 ] && [ -n "$appid" ] && [ -f "$acf" ]; then
+      if grep -q '"StateFlags"[[:space:]]*"4"' "$acf"; then inst=1; else part=1; fi
+    fi
+    printf 'game.%s.appid=%s\ngame.%s.installed=%s\ngame.%s.installing=%s\n' "$id" "$appid" "$id" "$inst" "$id" "$part"
+  done
+}
+
 # ── 指令：uninstall ──────────────────────────────────────────────────────
 cmd_uninstall() {
   local all=0
@@ -652,8 +767,10 @@ winsteam $VERSION — 在 Apple Silicon Mac 上跑 Windows 版 Steam
   backend [名稱]         查看或切換圖形後端：d3dmetal、dxmt、dxvk、wined3d
   hud on|off             開關 Metal 效能 HUD（看 FPS）
   status                 顯示目前 wrapper 的設定
+  state                  輸出機器可讀的狀態（是否已安裝、登入過、各遊戲是否已下載）
   logs                   顯示 Steam 記錄檔的位置與最後幾行
   kill                   強制結束卡住的 Wine 程序
+  prefetch               用較快的官方主機預先下載 Steam 用戶端更新（setup 會自動做）
   uninstall [--all]      刪除 wrapper（含遊戲）；--all 連下載的檔案一起刪
   version                顯示版本
 
@@ -694,6 +811,8 @@ main() {
     status)    cmd_status "$@" ;;
     logs)      cmd_logs "$@" ;;
     kill)      cmd_kill "$@" ;;
+    prefetch)  cmd_prefetch "$@" ;;
+    state)     cmd_state "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
     version|--version|-v) echo "winsteam $VERSION" ;;
     help|--help|-h) cmd_help ;;
