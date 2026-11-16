@@ -280,3 +280,57 @@ struct SetupStep: Identifiable {
 
     static func step(_ n: Int) -> SetupStep? { all.first { $0.number == n } }
 }
+
+// MARK: - Steam 實際狀態（winsteam state）
+
+/// `winsteam state` 的輸出：每行 key=value。
+struct SteamState: Equatable {
+    struct Game: Equatable {
+        var appID: String?
+        var installed = false
+        /// 有安裝記錄但還沒完成（例如下載中）
+        var installing = false
+    }
+
+    var wrapper = false
+    var steamInstalled = false
+    /// Steam 用戶端已經更新到最新版
+    var clientReady = false
+    /// Windows 版 Steam 正在執行
+    var running = false
+    /// 這份 Steam 記住了至少一個帳號（曾經登入過，不保證此刻仍登入）
+    var hasLoggedIn = false
+    var games: [String: Game] = [:]
+
+    /// 解析失敗（例如舊版 CLI 沒有 state 指令）時回傳 nil
+    static func parse(_ output: String) -> SteamState? {
+        var values: [String: String] = [:]
+        for line in output.split(whereSeparator: \.isNewline) {
+            guard let eq = line.firstIndex(of: "=") else { continue }
+            values[String(line[..<eq])] = String(line[line.index(after: eq)...])
+        }
+        guard values["steam_installed"] != nil else { return nil }
+        func flag(_ key: String) -> Bool { values[key] == "1" }
+
+        var s = SteamState()
+        s.wrapper = flag("wrapper")
+        s.steamInstalled = flag("steam_installed")
+        s.clientReady = flag("client_ready")
+        s.running = flag("running")
+        s.hasLoggedIn = flag("has_logged_in")
+        for key in values.keys where key.hasPrefix("game.") {
+            let parts = key.split(separator: ".")
+            guard parts.count == 3 else { continue }
+            let id = String(parts[1])
+            var g = s.games[id] ?? Game()
+            switch parts[2] {
+            case "appid": g.appID = values[key].flatMap { $0.isEmpty ? nil : $0 }
+            case "installed": g.installed = flag(key)
+            case "installing": g.installing = flag(key)
+            default: break
+            }
+            s.games[id] = g
+        }
+        return s
+    }
+}

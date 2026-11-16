@@ -32,6 +32,20 @@ struct AdvancedView: View {
                 }
             }
 
+            if let st = model.steam {
+                Section("Steam") {
+                    LabeledContent("用戶端已更新") { StatusIcon(status: st.clientReady ? .pass : .missing) }
+                    LabeledContent("曾經登入過") { StatusIcon(status: st.hasLoggedIn ? .pass : .missing) }
+                    LabeledContent("正在執行") { Text(st.running ? "是" : "否").foregroundStyle(.secondary) }
+                    ForEach(model.profiles) { p in
+                        let g = model.gameState(p)
+                        LabeledContent(p.name) {
+                            Text(g.installed ? "已安裝" : (g.installing ? "安裝中" : "未安裝")).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
             Section {
                 Picker("圖形後端", selection: Binding(
                     get: { model.pendingBackend ?? model.wrapper.backend },
@@ -72,6 +86,9 @@ struct AdvancedView: View {
                 }
                 ToolRow(title: "重新執行安裝", detail: "修復裝壞的地方，已完成的步驟會略過。") {
                     Button("執行") { model.path = []; model.install() }.disabled(model.isBusy)
+                }
+                ToolRow(title: "預先下載 Steam 更新", detail: "用較快的官方主機先把 Steam 用戶端的更新抓好。") {
+                    Button("下載") { model.prefetch() }.disabled(model.isBusy || !model.wrapper.hasSteam)
                 }
                 ToolRow(title: "預演安裝", detail: "只顯示安裝會做什麼，不會改動任何東西。") {
                     Button("預演") { model.dryRun() }.disabled(model.isBusy)
