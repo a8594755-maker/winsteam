@@ -2,12 +2,9 @@ import AppKit
 import Foundation
 import Observation
 
-enum AppSection: Hashable {
-    case games, status, troubleshoot
-}
-
 enum JobKind: Equatable {
-    case setup(dryRun: Bool)
+    case setup
+    case dryRun
     case openSteam
     case play(String)
     case backend
@@ -23,12 +20,32 @@ struct Job {
     let title: String
 }
 
+/// 首頁上的安裝狀態
 struct SetupProgress {
     var active = false
-    var dryRun = false
     var currentStep = 0
+    /// 已看到「✓ 安裝完成」，接下來 CLI 會自己開啟 Steam
+    var finishing = false
+    /// nil = 還沒結束；true / false = 成功 / 失敗
     var succeeded: Bool?
     var failure: String?
+    /// 靜默安裝失敗，CLI 改跳出 Steam 安裝精靈（需要使用者自己點）
+    var wizardFallback = false
+    /// 目前下載檔案的百分比（curl 進度列）
+    var downloadPercent: Int?
+
+    var fraction: Double {
+        if succeeded == true || finishing { return 1 }
+        guard currentStep > 0 else { return 0.02 }
+        return (Double(currentStep) - 0.5) / Double(SetupStep.count)
+    }
+
+    var message: String {
+        if finishing { return "安裝好了，正在開啟 Steam…" }
+        guard let step = SetupStep.step(currentStep) else { return "準備中…" }
+        if currentStep == 4, let p = downloadPercent { return step.message + "（\(p)%）" }
+        return step.message
+    }
 }
 
 struct LicensePrompt: Identifiable {
@@ -36,7 +53,7 @@ struct LicensePrompt: Identifiable {
     let text: String
 }
 
-/// 動作要開始前，GUI 需要先問使用者的事。
+/// 動作開始前需要先問使用者的事
 struct PendingConfirmation: Identifiable {
     let id = UUID()
     let title: String
@@ -45,48 +62,45 @@ struct PendingConfirmation: Identifiable {
     let action: () -> Void
 }
 
+enum Route: Hashable {
+    case advanced
+}
+
 @MainActor
 @Observable
 final class AppModel {
-    var section: AppSection? = .status
+    var path: [Route] = []
     var report = DoctorReport.placeholder
     var checking = false
     var wrapper = WrapperState()
     var profiles: [GameProfile] = []
     let console = ConsoleModel()
-    /// 一開始收合；執行任何指令時自動展開
-    var consoleExpanded = false
 
     private(set) var job: Job?
     var setup = SetupProgress()
+    /// 剛裝好：首頁顯示「請在 Steam 視窗登入」
+    var justInstalled = false
     var licensePrompt: LicensePrompt?
     var confirmation: PendingConfirmation?
-    var showSetupConfirm = false
     var errorMessage: String?
     /// 已經按過「開始遊戲」的設定檔，顯示它們的小提醒
     var launchedProfiles: Set<String> = []
     /// 剛按下、還沒寫進 Info.plist 的值，讓控制項不會跳回舊值
     var pendingBackend: Backend?
     var pendingHUD: Bool?
+    private(set) var loaded = false
 
     @ObservationIgnored private var runner: PTYProcess?
     @ObservationIgnored private var idleTask: Task<Void, Never>?
     @ObservationIgnored private var licenseScanFrom = 0
-    /// 這次指令輸出裡有 bash 本身的錯誤（CLI 的 --dry-run trap 可能讓它仍以 0 結束）
     @ObservationIgnored private var sawShellError = false
-    /// setup 有印出最後的「✓ 安裝完成」
-    @ObservationIgnored private var sawSetupDone = false
-    @ObservationIgnored private var didChooseInitialSection = false
+    @ObservationIgnored private var lastErrorLine: String?
 
     var isBusy: Bool { job != nil }
     var installed: Bool { wrapper.installed }
     var cliAvailable: Bool { Paths.cli != nil }
 
     // MARK: 狀態
-
-    func start() async {
-        await refresh()
-    }
 
     func reloadLocal() {
         wrapper = WrapperState.load()
@@ -95,8 +109,9 @@ final class AppModel {
 
     func refresh() async {
         reloadLocal()
+        loaded = true
         guard let cli = Paths.cli else {
-            errorMessage = "找不到 winsteam 命令列工具。請用 app/scripts/bundle.sh 重新組裝 App。"
+            errorMessage = "找不到 winsteam 命令列工具，請重新下載 WinSteam。"
             return
         }
         checking = true
@@ -104,20 +119,6 @@ final class AppModel {
         report = DoctorReport.parse(result.output)
         checking = false
         reloadLocal()
-        if !didChooseInitialSection {
-            didChooseInitialSection = true
-            section = installed ? .games : .status
-        }
-    }
-
-    /// 安裝前一定要通過的項目（setup 一開始就會檢查）
-    var setupBlockers: [String] {
-        var out: [String] = []
-        if report.status(.appleSilicon) == .fail { out.append("這台 Mac 不是 Apple 晶片，無法使用。") }
-        if report.status(.macOS) == .fail { out.append("需要 macOS 14 以上。") }
-        if report.status(.homebrew) == .fail { out.append("需要先安裝 Homebrew（brew.sh），安裝 Homebrew 需要用到終端機。") }
-        if report.status(.disk) == .fail, let d = report.items[.disk]?.detail { out.append(d) }
-        return out
     }
 
     // MARK: 執行 CLI
@@ -126,10 +127,9 @@ final class AppModel {
                         completion: ((Int32) -> Void)? = nil) {
         guard job == nil else { return }
         guard let cli = Paths.cli else {
-            errorMessage = "找不到 winsteam 命令列工具。"
+            errorMessage = "找不到 winsteam 命令列工具，請重新下載 WinSteam。"
             return
         }
-        consoleExpanded = true
         console.flushPartial()
         console.add("$ winsteam " + args.map(Self.shellQuote).joined(separator: " "), kind: .command)
 
@@ -146,24 +146,28 @@ final class AppModel {
             job = Job(kind: kind, title: title)
             licenseScanFrom = console.nextID
             sawShellError = false
-            sawSetupDone = false
+            lastErrorLine = nil
         } catch {
             console.add("✗ 無法執行 winsteam：\(error.localizedDescription)", kind: .bad)
+            errorMessage = "無法執行 winsteam：\(error.localizedDescription)"
         }
     }
 
     private func handleOutput(_ text: String) {
         let lines = console.feed(text)
-        if lines.contains(where: ConsoleModel.isShellError) { sawShellError = true }
-        if case .setup = job?.kind {
-            for line in lines { observeSetupLine(line) }
-            checkLicensePrompt(idle: false)
-            idleTask?.cancel()
-            idleTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(2))
-                guard !Task.isCancelled else { return }
-                self?.checkLicensePrompt(idle: true)
-            }
+        for line in lines {
+            if ConsoleModel.isShellError(line) { sawShellError = true; lastErrorLine = line }
+            if line.hasPrefix("✗") { lastErrorLine = String(line.dropFirst()).trimmingCharacters(in: .whitespaces) }
+        }
+        guard job?.kind == .setup else { return }
+        for line in lines { observeSetupLine(line) }
+        if setup.currentStep == 4 { setup.downloadPercent = Self.percent(in: console.partial) ?? setup.downloadPercent }
+        checkLicensePrompt(idle: false)
+        idleTask?.cancel()
+        idleTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self?.checkLicensePrompt(idle: true)
         }
     }
 
@@ -176,22 +180,31 @@ final class AppModel {
             console.add("✗ winsteam 執行時發生錯誤（見上方），雖然它回報成功，WinSteam 仍把這次當成失敗。", kind: .bad)
         }
         console.add(status == 0 ? "— 完成" : "— 結束（代碼 \(exitCode)）", kind: .note)
-        let finishedKind = job?.kind
+        let kind = job?.kind
         runner = nil
         job = nil
         licensePrompt = nil
 
-        if case .setup(let dry) = finishedKind {
+        if kind == .setup {
             setup.active = false
-            if status == 0 && !sawSetupDone {
-                status = 1
-                setup.failure = "winsteam 沒有印出「安裝完成」就結束了，安裝可能沒有完成。詳細內容請看下方輸出。"
+            // 新版 CLI 成功後會自己執行 run；以「安裝完成」或走到第 7 步為準
+            if status == 0 && !(setup.finishing || setup.currentStep >= SetupStep.count) { status = 1 }
+            if status == 0 {
+                reloadLocal()
+                if !installed {
+                    status = 1
+                    setup.failure = "安裝程式說完成了，但找不到可以啟動的 Windows 版 Steam。"
+                }
             }
             setup.succeeded = status == 0
-            if status == 0 && !dry { setup.currentStep = 8 }
-            if status != 0 && setup.failure == nil {
-                setup.failure = "安裝在第 \(max(setup.currentStep, 1)) 步停下來了（代碼 \(status)）。詳細內容請看下方輸出。"
+            if status == 0 {
+                justInstalled = true
+            } else if setup.failure == nil {
+                setup.failure = lastErrorLine ?? "安裝在第 \(max(setup.currentStep, 1)) 步停下來了。"
             }
+            setup.failure = setup.failure.map(Self.friendlyFailure)
+        } else if status != 0, let kind, [.openSteam, .backend, .hud, .kill, .uninstall].contains(kind) || isPlay(kind) {
+            errorMessage = (lastErrorLine ?? "沒有成功。") + "\n\n詳細過程在「進階」的輸出區。"
         }
         completion?(status)
         pendingBackend = nil
@@ -199,20 +212,38 @@ final class AppModel {
         Task { await refresh() }
     }
 
+    private func isPlay(_ kind: JobKind) -> Bool {
+        if case .play = kind { return true }
+        return false
+    }
+
     func stop() {
         guard let runner else { return }
         console.add("（已要求停止）", kind: .note)
+        if job?.kind == .setup { setup.failure = "安裝已停止。" }
         runner.terminate()
     }
 
     // MARK: 安裝
 
-    func startSetup(dryRun: Bool) {
-        setup = SetupProgress(active: true, dryRun: dryRun, currentStep: 0, succeeded: nil, failure: nil)
-        // 乾跑不需要 --yes（CLI 會自己略過確認）。真正安裝時，使用者已在 GUI 的確認視窗同意，
-        // 所以加 --yes 回答 CLI 的「要安裝嗎？」。Apple 的 Rosetta 授權條款不在此列，另外詢問。
-        let args = dryRun ? ["--dry-run", "setup"] : ["--yes", "setup"]
-        runCLI(args, kind: .setup(dryRun: dryRun), title: dryRun ? "預演安裝" : "安裝中")
+    /// 使用者在首頁按「安裝」或「重試」。按下這顆按鈕就是同意安裝（按鈕下方有說明會做什麼），
+    /// 所以加 --yes 回答 CLI 的「要安裝嗎？」。Apple 的 Rosetta 授權條款不在此列，另外由使用者決定。
+    func install() {
+        withNativeSteamCheck("安裝完成後開啟 Windows 版 Steam") { [weak self] _ in
+            guard let self else { return }
+            self.justInstalled = false
+            self.setup = SetupProgress(active: true)
+            self.runCLI(["--yes", "setup"], kind: .setup, title: "安裝中")
+        }
+    }
+
+    /// 進階頁的預演，不影響首頁狀態
+    func dryRun() {
+        runCLI(["--dry-run", "setup"], kind: .dryRun, title: "預演安裝")
+    }
+
+    func backToStart() {
+        setup = SetupProgress()
     }
 
     private func observeSetupLine(_ line: String) {
@@ -220,12 +251,40 @@ final class AppModel {
             let rest = line.dropFirst(2)
             if let slash = rest.firstIndex(of: "/"), let n = Int(rest[..<slash]) {
                 setup.currentStep = n
+                setup.downloadPercent = nil
             }
         } else if line.hasPrefix("✓") && line.contains("安裝完成") {
-            sawSetupDone = true
+            setup.finishing = true
+        } else if line.contains("改用 Steam 的安裝精靈") {
+            setup.wizardFallback = true
         } else if line.hasPrefix("✗") || ConsoleModel.isShellError(line) {
-            setup.failure = line.hasPrefix("✗") ? String(line.dropFirst()).trimmingCharacters(in: .whitespaces) : line
+            setup.failure = line.hasPrefix("✗") ? String(line.dropFirst()).trimmingCharacters(in: .whitespaces) : "安裝程式發生錯誤。"
         }
+    }
+
+    /// 把 CLI 的錯誤訊息換成一般人看得懂的一句話；原文在「詳細資訊」裡。
+    static func friendlyFailure(_ raw: String) -> String {
+        let rules: [(String, String)] = [
+            ("下載失敗", "下載沒有成功，可能是網路不穩。確認網路連線後按「重試」。"),
+            ("SHA-256", "下載的檔案不完整，已經刪掉了。請按「重試」重新下載。"),
+            ("Homebrew", "這台 Mac 還沒有 Homebrew。請先到 brew.sh 照說明安裝（需要用到終端機），裝好後按「重試」。"),
+            ("可用空間", "硬碟空間不夠。清出一些空間後按「重試」。"),
+            ("找不到 Steam.exe", "Windows 版 Steam 沒有裝成功。請按「重試」再裝一次。"),
+            ("Windows 環境不完整", "建立 Windows 環境時出了問題。請按「重試」再試一次。"),
+            ("unbound variable", "安裝程式發生內部錯誤。請按「重試」；如果一直出現，請把「詳細資訊」的內容回報給我們。"),
+        ]
+        if let hit = rules.first(where: { raw.contains($0.0) }) { return hit.1 }
+        // 其他情況：拿掉網址與路徑這類技術細節
+        var text = raw.replacingOccurrences(of: #"\s*https?://\S+"#, with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"\s*/(Users|private|Applications)/\S+"#, with: "", options: .regularExpression)
+        text = text.trimmingCharacters(in: CharacterSet(charactersIn: "：: "))
+        return text.isEmpty ? "安裝沒有完成。" : text
+    }
+
+    private static func percent(in text: String) -> Int? {
+        guard let r = text.range(of: #"(\d{1,3})(\.\d)?%\s*$"#, options: .regularExpression) else { return nil }
+        let digits = text[r].prefix { $0.isNumber }
+        return Int(digits).map { min($0, 100) }
     }
 
     // MARK: Rosetta 2 授權
@@ -237,7 +296,7 @@ final class AppModel {
 
     /// 偵測 softwareupdate 的授權提示。WinSteam 絕不自動回答：只會跳出視窗，由使用者親自按「我同意」。
     private func checkLicensePrompt(idle: Bool) {
-        guard case .setup(dryRun: false) = job?.kind, licensePrompt == nil else { return }
+        guard job?.kind == .setup, licensePrompt == nil else { return }
         var recent = Array(console.lines(since: licenseScanFrom).map(\.text).suffix(8))
         if let header = recent.lastIndex(where: { $0.hasPrefix("▸") }) {
             recent = Array(recent[(header + 1)...])   // 只顯示這一步之後的文字
@@ -255,7 +314,6 @@ final class AppModel {
 
     func answerLicense(agree: Bool) {
         guard let runner else { licensePrompt = nil; return }
-        // 不再重新偵測這一行（送出回答後它才會換行收進記錄）
         licenseScanFrom = console.nextID + (console.partial.isEmpty ? 0 : 1)
         licensePrompt = nil
         if agree {
@@ -263,7 +321,7 @@ final class AppModel {
             runner.write("A\n")
         } else {
             console.add("（你沒有同意 Apple 的授權條款，已停止安裝）", kind: .note)
-            setup.failure = "你沒有同意 Rosetta 2 的授權條款，所以安裝停止了。沒有 Rosetta 2 無法執行 Windows 版 Steam。"
+            setup.failure = "沒有同意 Rosetta 2 的授權條款，所以安裝停止了。沒有 Rosetta 2 就無法執行 Windows 版 Steam。"
             runner.terminate()
         }
     }
@@ -272,6 +330,7 @@ final class AppModel {
     func installRosettaInTerminal() {
         if licensePrompt != nil {
             licensePrompt = nil
+            setup.failure = "改用終端機安裝 Rosetta 2。裝好後回到這裡按「重試」。"
             runner?.terminate()
         }
         let script = """
@@ -282,7 +341,7 @@ final class AppModel {
         echo
         /usr/sbin/softwareupdate --install-rosetta
         echo
-        echo "完成後可以關閉這個視窗，回到 WinSteam 按「重新檢查」，再按「開始安裝」。"
+        echo "完成後可以關閉這個視窗，回到 WinSteam 按「重試」。"
         """
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("WinSteam-安裝Rosetta2.command")
         do {
@@ -294,17 +353,17 @@ final class AppModel {
         }
     }
 
-    // MARK: 啟動
+    // MARK: 啟動（只透過 winsteam run / play，且一定要先確認 Steam 已裝好）
 
     /// macOS 版 Steam 開著時，CLI 會問要不要先關掉；GUI 先問使用者，同意才加 --yes。
-    private func withNativeSteamCheck(_ title: String, run: @escaping (_ yes: Bool) -> Void) {
+    private func withNativeSteamCheck(_ what: String, run: @escaping (_ yes: Bool) -> Void) {
         Task {
             let r = await CommandCapture.run(URL(fileURLWithPath: "/usr/bin/pgrep"), ["-x", "steam_osx"])
             if r.status == 0 {
                 confirmation = PendingConfirmation(
-                    title: "macOS 版 Steam 正在執行",
-                    message: "同一個帳號兩邊同時登入，Windows 版會顯示 NO CONNECTION。要先關閉 macOS 版 Steam，再\(title)嗎？",
-                    confirmLabel: "關閉 macOS 版並繼續",
+                    title: "要先關閉 macOS 版 Steam",
+                    message: "同一個帳號兩邊同時登入，Windows 版會連不上線。要關閉 macOS 版 Steam，再\(what)嗎？",
+                    confirmLabel: "關閉並繼續",
                     action: { run(true) })
             } else {
                 run(false)
@@ -312,17 +371,29 @@ final class AppModel {
         }
     }
 
+    /// 直接開 wrapper 在沒裝好時會跳出 Sikarugir 的設定視窗，所以先重新確認狀態。
+    private func ensureInstalled() -> Bool {
+        reloadLocal()
+        if !installed {
+            errorMessage = "Windows 版 Steam 還沒裝好。請先按「安裝」。"
+            return false
+        }
+        return true
+    }
+
     func openSteam() {
+        guard ensureInstalled() else { return }
         withNativeSteamCheck("開啟 Steam") { [weak self] yes in
             self?.runCLI((yes ? ["--yes"] : []) + ["run"], kind: .openSteam, title: "開啟 Steam")
         }
     }
 
-    func play(_ profile: GameProfile, backend: Backend?) {
+    func play(_ profile: GameProfile, backend: Backend? = nil) {
+        guard ensureInstalled() else { return }
         withNativeSteamCheck("開始遊戲") { [weak self] yes in
             var args = (yes ? ["--yes"] : []) + ["play", profile.id]
             if let backend { args += ["--backend", backend.rawValue] }
-            self?.runCLI(args, kind: .play(profile.id), title: "啟動 \(profile.name)") { status in
+            self?.runCLI(args, kind: .play(profile.id), title: "開啟 \(profile.name)") { status in
                 if status == 0 { self?.launchedProfiles.insert(profile.id) }
             }
         }
@@ -332,7 +403,7 @@ final class AppModel {
         launchedProfiles.remove(profile.id)
     }
 
-    // MARK: 調校
+    // MARK: 進階
 
     func setBackend(_ backend: Backend) {
         guard backend != wrapper.backend else { return }
@@ -345,19 +416,9 @@ final class AppModel {
         runCLI(["hud", on ? "on" : "off"], kind: .hud, title: on ? "開啟 Metal HUD" : "關閉 Metal HUD")
     }
 
-    // MARK: 疑難排解
-
-    func killWine() {
-        runCLI(["kill"], kind: .kill, title: "結束 Wine 程序")
-    }
-
-    func showLogs() {
-        runCLI(["logs"], kind: .logs, title: "查看記錄")
-    }
-
-    func showStatus() {
-        runCLI(["status"], kind: .status, title: "目前設定")
-    }
+    func killWine() { runCLI(["kill"], kind: .kill, title: "結束 Wine 程序") }
+    func showLogs() { runCLI(["logs"], kind: .logs, title: "查看記錄") }
+    func showStatus() { runCLI(["status"], kind: .status, title: "目前設定") }
 
     func revealLogs() {
         let fm = FileManager.default
@@ -371,7 +432,7 @@ final class AppModel {
             if status == 0 {
                 self?.launchedProfiles.removeAll()
                 self?.setup = SetupProgress()
-                self?.section = .status
+                self?.justInstalled = false
             }
         }
     }
@@ -382,8 +443,6 @@ final class AppModel {
         guard r.status == 0 else { return nil }
         return r.output.split(whereSeparator: { $0 == "\t" || $0 == " " }).first.map(String.init)
     }
-
-    // MARK: 小工具
 
     private static func shellQuote(_ s: String) -> String {
         s.contains(where: { $0 == " " || $0 == "'" }) ? "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" : s

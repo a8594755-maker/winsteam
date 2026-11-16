@@ -35,8 +35,14 @@ struct WrapperState: Equatable {
     /// nil 表示這個範本的 Info.plist 沒有 METAL_HUD 鍵。
     var hud: Bool?
     var msync: Int?
+    /// Info.plist 的「Program Name and Path」。安裝到一半時會是 /nothing.exe 或 /SteamSetup.exe，
+    /// 這時直接開 wrapper 會跳出 Sikarugir 的設定視窗，所以不能算已安裝。
+    var programPath: String?
 
-    var installed: Bool { hasWrapper && hasSteam }
+    var launchTargetIsSteam: Bool { programPath?.lowercased().hasSuffix("/steam.exe") == true }
+    var installed: Bool { hasWrapper && hasSteam && launchTargetIsSteam }
+    /// 有東西但沒裝完（例如安裝中途被停止）
+    var partiallyInstalled: Bool { hasWrapper && !installed }
 
     static func load() -> WrapperState {
         let fm = FileManager.default
@@ -60,6 +66,7 @@ struct WrapperState: Equatable {
         else { s.backend = .wined3d }
         s.hud = int("METAL_HUD").map { $0 == 1 }
         s.msync = int("WINEMSYNC")
+        s.programPath = dict["Program Name and Path"] as? String
         return s
     }
 }
@@ -116,7 +123,8 @@ struct GameProfile: Identifiable, Equatable {
     }
 
     static func loadAll() -> [GameProfile] {
-        guard let dir = Paths.profiles,
+        // 資料夾本身可能是 symlink，contentsOfDirectory 不會跟著走
+        guard let dir = Paths.profiles?.resolvingSymlinksInPath(),
               let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
         else { return [] }
         return files
@@ -251,28 +259,24 @@ struct DoctorReport {
 
 struct SetupStep: Identifiable {
     let number: Int
+    /// 進階頁、記錄用的短標題
     let title: String
-    let detail: String
-    /// 需要使用者親自動手的說明
-    let userAction: String?
+    /// 安裝畫面上給一般使用者看的一句話
+    let message: String
     var id: Int { number }
 
+    static let count = 7
+
     static let all: [SetupStep] = [
-        SetupStep(number: 1, title: "檢查環境",
-                  detail: "確認 Apple Silicon、macOS 版本、Homebrew 與可用空間。", userAction: nil),
-        SetupStep(number: 2, title: "Rosetta 2",
-                  detail: "Wine 執行的是 Intel 程式，需要 Apple 的 Rosetta 2。",
-                  userAction: "如果還沒安裝，會出現 Apple 的授權條款，請自己閱讀並決定是否同意。"),
-        SetupStep(number: 3, title: "Sikarugir Creator",
-                  detail: "用 Homebrew 安裝 Wine 的包裝工具。", userAction: nil),
+        SetupStep(number: 1, title: "檢查環境", message: "正在檢查這台 Mac…"),
+        SetupStep(number: 2, title: "Rosetta 2", message: "正在準備 Apple 的 Rosetta 2…"),
+        SetupStep(number: 3, title: "Sikarugir Creator", message: "正在安裝 Windows 相容工具…"),
         SetupStep(number: 4, title: "下載 Wine 引擎與範本",
-                  detail: "從 GitHub 下載並核對檔案雜湊，網路慢時要等一下。", userAction: nil),
-        SetupStep(number: 5, title: "建立 Windows 環境",
-                  detail: "組裝 wrapper 並建立 Windows 環境，第一次會花一兩分鐘。", userAction: nil),
-        SetupStep(number: 6, title: "安裝 Windows 版 Steam",
-                  detail: "會跳出 Steam 的安裝精靈（Wine 視窗，可能出現在其他視窗後面）。",
-                  userAction: "安裝路徑保持預設，不要改；最後一頁先取消勾選「Run Steam」，再按 Finish。"),
-        SetupStep(number: 7, title: "寫入設定",
-                  detail: "把啟動目標設為 Steam，圖形後端設為 D3DMetal。", userAction: nil),
+                  message: "正在下載 Windows 相容元件，視網路速度約需幾分鐘到十分鐘…"),
+        SetupStep(number: 5, title: "建立 Windows 環境", message: "正在建立 Windows 環境，約需一兩分鐘…"),
+        SetupStep(number: 6, title: "安裝 Windows 版 Steam", message: "正在安裝 Windows 版 Steam，通常一分鐘內完成…"),
+        SetupStep(number: 7, title: "寫入設定", message: "快好了，正在完成設定…"),
     ]
+
+    static func step(_ n: Int) -> SetupStep? { all.first { $0.number == n } }
 }

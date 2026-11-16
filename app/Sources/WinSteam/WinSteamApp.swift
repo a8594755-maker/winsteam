@@ -13,7 +13,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "light": NSApp.appearance = NSAppearance(named: .aqua)
         default: break
         }
-        NSApp.activate(ignoringOtherApps: true)
     }
 }
 
@@ -26,22 +25,22 @@ struct WinSteamApp: App {
         Window("WinSteam", id: "main") {
             ContentView()
                 .environment(model)
-                .frame(minWidth: 920, minHeight: 640)
-                .task { await model.start() }
+                .frame(minWidth: 620, minHeight: 520)
+                .task { await model.refresh() }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                    guard !model.isBusy, !model.checking else { return }
+                    guard model.loaded, !model.isBusy, !model.checking else { return }
                     Task { await model.refresh() }
                 }
         }
-        .defaultSize(width: 1080, height: 780)
+        .defaultSize(width: 720, height: 640)
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandMenu("操作") {
+                Button("進階…") { model.path = [.advanced] }
+                    .keyboardShortcut(",", modifiers: [.command, .shift])
                 Button("重新檢查") { Task { await model.refresh() } }
                     .keyboardShortcut("r")
                     .disabled(model.checking)
-                Button(model.consoleExpanded ? "隱藏輸出" : "顯示輸出") { model.consoleExpanded.toggle() }
-                    .keyboardShortcut("j")
                 Divider()
                 Button("停止目前的動作") { model.stop() }
                     .keyboardShortcut(".")
