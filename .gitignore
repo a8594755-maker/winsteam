@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# 下載的安裝檔與引擎（不進版控）
+downloads/
+*.exe
+*.msi
+*.dmg
+*.pkg
+*.tar.xz
+*.tar.gz
+*.zip
+
+# Wine wrapper / prefix
+*.app/
+drive_c/
+prefix/
+
+# 記錄檔
+logs/
+*.log
+
+# 機密
+.env
+.env.*
