@@ -143,3 +143,9 @@ Sikarugir Creator 和 Rosetta 2 會留著。要移除 Creator：`brew uninstall 
 - 相容性資料來自 [CodeWeavers](https://www.codeweavers.com/compatibility) 與 [ProtonDB](https://www.protondb.com)。
 
 winsteam 與 Valve、Steam、CodeWeavers 或任何遊戲開發商沒有關係。
+
+## 授權
+
+winsteam 本身以 [MIT 授權](LICENSE)釋出。
+
+這份授權只涵蓋這個儲存庫裡的檔案。winsteam 在安裝過程中下載的 Sikarugir、Wine、Rosetta 2、Steam 與各款遊戲，各自適用它們原本的授權與使用條款。
