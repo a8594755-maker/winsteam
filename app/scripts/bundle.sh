@@ -26,6 +26,12 @@ echo "▸ 組裝 $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources/bin" "$OUT/Contents/Resources/zh-Hant.lproj"
 cp "$BIN_DIR/WinSteam" "$OUT/Contents/MacOS/WinSteam"
+# 拿掉除錯符號。裡面記著編譯時的絕對路徑（含本機使用者名稱），不該隨 App 發佈出去。
+strip -S -x "$OUT/Contents/MacOS/WinSteam"
+if LC_ALL=C grep -a -q -F -- "$HOME/" "$OUT/Contents/MacOS/WinSteam"; then
+  echo "✗ 執行檔裡仍含有家目錄路徑（$HOME），停止打包" >&2
+  exit 1
+fi
 # CLI 會用自己所在位置的 ../profiles，所以放在 Resources/bin 與 Resources/profiles
 cp "$REPO/bin/winsteam" "$OUT/Contents/Resources/bin/winsteam"
 chmod 755 "$OUT/Contents/Resources/bin/winsteam"
