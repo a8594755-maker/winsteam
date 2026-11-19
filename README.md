@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/a8594755-maker/winsteam/main/instal
 安裝腳本會做三件事，都不需要 `sudo`：
 
 - 把命令列工具放到 `~/.winsteam`，並在 PATH 上建立 `winsteam` 連結。
-- 把圖形介面 **WinSteam.app** 放到 `~/Applications`（從最新的 [Release](https://github.com/a8594755-maker/winsteam/releases/latest) 下載，會比對檢查碼並驗證簽章）。不想要圖形介面的話，在指令前面加 `WINSTEAM_NO_APP=1`。
+- 把圖形介面 **WinSteam.app** 放到 `~/Applications`（從最新的 [Release](https://github.com/a8594755-maker/winsteam/releases/latest) 下載，會比對檢查碼並驗證簽章）。不想要圖形介面的話，把指令結尾的 `| bash` 改成 `| WINSTEAM_NO_APP=1 bash`。
 
 裝好後有兩種用法，擇一即可。
 
