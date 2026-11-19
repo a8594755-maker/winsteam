@@ -123,15 +123,28 @@ EOF
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
 echo "/dev/fake 500000000 100000000 209715200 33% /"
 EOF
-  # curl：有 state/curl_tarball 時把該檔寫到 -o 指定的路徑；否則失敗（exit 22）
+  # curl：依網址決定回什麼，把對應的本機檔案寫到 -o 指定的路徑；沒有對應檔案就失敗（exit 22）
+  #   …/WinSteam.zip.sha256 → state/curl_appsha 指到的檔案
+  #   …/WinSteam.zip        → state/curl_appzip 指到的檔案
+  #   其他                  → state/curl_tarball 指到的檔案
   _fake curl <<'EOF'
 printf '%s\n' "$*" >> "$SB/log/curl.log"
-out=""
+out=""; url=""
 while [ $# -gt 0 ]; do
-  case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    --max-time|--retry|--retry-delay|-r|-D) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
 done
-if [ -f "$SB/state/curl_tarball" ] && [ -n "$out" ]; then
-  cp "$(cat "$SB/state/curl_tarball")" "$out"; exit 0
+case "$url" in
+  *WinSteam.zip.sha256) ptr="$SB/state/curl_appsha" ;;
+  *WinSteam.zip)        ptr="$SB/state/curl_appzip" ;;
+  *)                    ptr="$SB/state/curl_tarball" ;;
+esac
+if [ -f "$ptr" ] && [ -n "$out" ]; then
+  cp "$(cat "$ptr")" "$out"; exit 0
 fi
 echo "curl: (22) The requested URL returned error: 404" >&2
 exit 22

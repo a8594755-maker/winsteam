@@ -20,9 +20,20 @@
 curl -fsSL https://raw.githubusercontent.com/a8594755-maker/winsteam/main/install.sh | bash
 ```
 
-安裝腳本只會把 winsteam 放到 `~/.winsteam` 並在 PATH 上建立連結，不需要 `sudo`。
+安裝腳本會做三件事，都不需要 `sudo`：
 
-接著：
+- 把命令列工具放到 `~/.winsteam`，並在 PATH 上建立 `winsteam` 連結。
+- 把圖形介面 **WinSteam.app** 放到 `~/Applications`（從最新的 [Release](https://github.com/a8594755-maker/winsteam/releases/latest) 下載，會比對檢查碼並驗證簽章）。不想要圖形介面的話，在指令前面加 `WINSTEAM_NO_APP=1`。
+
+裝好後有兩種用法，擇一即可。
+
+**用圖形介面：** 打開 WinSteam，按「安裝」。
+
+```bash
+open ~/Applications/WinSteam.app
+```
+
+**用命令列：**
 
 ```bash
 winsteam doctor
@@ -97,7 +108,13 @@ TIPS="第一條提醒|第二條提醒"
 
 ## 圖形介面
 
-`app/` 是原生的 macOS App（WinSteam），把上面的指令包成按鈕。編譯方式見 [app/README.md](app/README.md)。
+WinSteam.app 是原生的 macOS App，把上面的指令包成按鈕：還沒安裝時只有一顆「安裝」，裝好並登入 Steam 後顯示遊戲清單，每款遊戲依狀態顯示「到 Steam 安裝」、「下載中」或「開始遊戲」。圖形後端、記錄、移除等選項收在右上角的「進階」。
+
+安裝腳本會自動把它放到 `~/Applications`。它內含自己的一份命令列工具，所以單獨使用也可以。
+
+**如果你是從 Releases 頁面用瀏覽器手動下載 `WinSteam.zip`：** 這個 App 只有 ad-hoc 簽章，沒有經過 Apple 公證，第一次打開時 macOS 會說無法驗證開發者。到「系統設定 → 隱私權與安全性」往下捲，按「仍要打開」即可。用上面的安裝指令則不會遇到這個提示。
+
+原始碼在 `app/`，自行編譯的方式見 [app/README.md](app/README.md)。
 
 ## 效能調校
 
